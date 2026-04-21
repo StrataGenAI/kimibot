@@ -270,6 +270,71 @@ class BacktestEngine:
                 }
             )
 
+        # Force-settle any open positions for markets whose outcome is known but
+        # resolution_time fell outside the replay window (e.g. test window ends
+        # at 23:45 but market resolves at 00:00 the next day).
+        final_timestamp = equity_curve[-1]["timestamp"] if equity_curve else None
+        if final_timestamp is not None:
+            for _, meta in self.bundle.market_metadata.iterrows():
+                market_id = meta["market_id"]
+                if market_id in settled_markets:
+                    continue
+                outcome_yes = meta.get("outcome_yes")
+                try:
+                    outcome_int = int(float(outcome_yes))
+                except (TypeError, ValueError):
+                    continue
+                settlements = portfolio.settle_market(state, market_id, outcome_int, final_timestamp)
+                for settlement in settlements:
+                    entry_prediction = entry_prediction_by_position.get(settlement.position_id, {})
+                    trade_log.append(
+                        {
+                            "experiment_id": experiment_id,
+                            "split_type": split_mode,
+                            "fold_id": fold_by_market.get(market_id).fold.fold_id
+                            if market_id in fold_by_market
+                            else None,
+                            "position_id": settlement.position_id,
+                            "timestamp": final_timestamp.isoformat(),
+                            "entry_timestamp": settlement.entry_timestamp.isoformat(),
+                            "exit_timestamp": settlement.exit_timestamp.isoformat(),
+                            "market_id": market_id,
+                            "event": "settlement",
+                            "action": "SETTLE",
+                            "side": settlement.side,
+                            "p_model_raw_entry": float(entry_prediction.get("p_model_raw", 0.0)),
+                            "p_model_calibrated_entry": float(entry_prediction.get("p_model_calibrated", 0.0)),
+                            "p_market_entry": float(entry_prediction.get("p_market", 0.0)),
+                            "edge_entry": float(entry_prediction.get("edge", 0.0)),
+                            "ev_entry": float(entry_prediction.get("expected_value", 0.0)),
+                            "filled_notional": settlement.cost_basis,
+                            "fill_price": settlement.average_price,
+                            "fees_paid": 0.0,
+                            "reason": "force_settle_end_of_window",
+                            "holding_duration_seconds": settlement.holding_duration_seconds,
+                            "resolved_outcome": settlement.resolved_outcome,
+                            "realized_pnl": settlement.realized_pnl,
+                            "return_on_notional": settlement.realized_pnl / settlement.cost_basis
+                            if settlement.cost_basis > 0.0
+                            else 0.0,
+                            "prediction_error_raw": abs(
+                                float(entry_prediction.get("p_model_raw", 0.0)) - float(settlement.resolved_outcome)
+                            ),
+                            "prediction_error_calibrated": abs(
+                                float(entry_prediction.get("p_model_calibrated", 0.0)) - float(settlement.resolved_outcome)
+                            ),
+                            "outcome_vs_prediction_raw": float(entry_prediction.get("p_model_raw", 0.0))
+                            - float(settlement.resolved_outcome),
+                            "outcome_vs_prediction_calibrated": float(entry_prediction.get("p_model_calibrated", 0.0))
+                            - float(settlement.resolved_outcome),
+                        }
+                    )
+                if settlements:
+                    settled_markets.add(market_id)
+                    for entry in prediction_log:
+                        if entry["market_id"] == market_id and entry["label"] is None:
+                            entry["label"] = outcome_int
+
         metrics = compute_metrics(
             equity_curve,
             trade_log,

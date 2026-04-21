@@ -46,9 +46,7 @@ class LogisticRegressionPredictor:
         scaled = self.scaler.transform(frame.to_numpy(dtype=float))
         probability = self.model.predict_proba(scaled)[0, 1]
 
-        # CLIP: prevent overconfident predictions
-        # Use 0.20-0.80 to avoid extreme edges after clipping
-        probability = float(np.clip(probability, 0.20, 0.80))
+        probability = float(np.clip(probability, 0.05, 0.95))
 
         return probability
 
@@ -60,8 +58,7 @@ class LogisticRegressionPredictor:
             0
         ]
 
-        # Additional clip after calibration (redundant but safe)
-        calibrated = float(np.clip(calibrated, 0.20, 0.80))
+        calibrated = float(np.clip(calibrated, 0.05, 0.95))
 
         return calibrated
 

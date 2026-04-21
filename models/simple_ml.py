@@ -42,18 +42,25 @@ class LogisticRegressionModel:
     bias_: float = 0.0
 
     def fit(self, features: np.ndarray, labels: np.ndarray) -> "LogisticRegressionModel":
-        """Fit weights with batch gradient descent."""
+        """Fit weights with class-balanced batch gradient descent."""
 
         sample_count, feature_count = features.shape
         self.weights_ = np.zeros(feature_count, dtype=float)
         self.bias_ = 0.0
 
+        # Per-sample class weights inversely proportional to class frequency.
+        pos = max(float((labels == 1).sum()), 1.0)
+        neg = max(float((labels == 0).sum()), 1.0)
+        w_pos = sample_count / (2.0 * pos)
+        w_neg = sample_count / (2.0 * neg)
+        sample_weights = np.where(labels == 1, w_pos, w_neg)
+
         for _ in range(self.max_iter):
             linear = features @ self.weights_ + self.bias_
             probs = self._sigmoid(linear)
-            error = probs - labels
-            grad_w = (features.T @ error) / sample_count + self.l2_penalty * self.weights_
-            grad_b = float(error.mean())
+            weighted_error = (probs - labels) * sample_weights
+            grad_w = (features.T @ weighted_error) / sample_count + self.l2_penalty * self.weights_
+            grad_b = float(weighted_error.mean())
             self.weights_ -= self.learning_rate * grad_w
             self.bias_ -= self.learning_rate * grad_b
         return self

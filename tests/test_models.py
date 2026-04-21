@@ -131,15 +131,15 @@ class PredictorTests(unittest.TestCase):
         predictor = self._make_predictor()
         row = _make_feature_row()
         raw = predictor.predict_raw(row)
-        self.assertGreaterEqual(raw, 0.20)
-        self.assertLessEqual(raw, 0.80)
+        self.assertGreaterEqual(raw, 0.05)
+        self.assertLessEqual(raw, 0.95)
 
     def test_predict_calibrated_clips_to_bounds(self):
         predictor = self._make_predictor()
         row = _make_feature_row()
         calibrated = predictor.predict(row)
-        self.assertGreaterEqual(calibrated, 0.20)
-        self.assertLessEqual(calibrated, 0.80)
+        self.assertGreaterEqual(calibrated, 0.05)
+        self.assertLessEqual(calibrated, 0.95)
 
     def test_save_and_load_round_trip(self):
         predictor = self._make_predictor()
@@ -178,6 +178,32 @@ class PredictorTests(unittest.TestCase):
             )
             loaded = LogisticRegressionPredictor.load(model_path, scaler_path, None, meta_path)
         self.assertIsInstance(loaded.calibrator, IdentityCalibrator)
+
+
+class BalancedCalibrationTests(unittest.TestCase):
+    """Verify that class-balanced training + calibration yields a reasonable Brier score."""
+
+    def test_brier_score_on_balanced_synthetic(self) -> None:
+        rng = np.random.default_rng(42)
+        n = 400
+        X = rng.standard_normal((n, 3))
+        labels = (X[:, 0] + 0.5 * X[:, 1] > 0).astype(float)
+
+        scaler = StandardScalerModel().fit(X[:300])
+        X_scaled = scaler.transform(X)
+
+        model = LogisticRegressionModel()
+        model.fit(X_scaled[:300], labels[:300])
+
+        raw_scores = model.predict_proba(X_scaled[300:])[:, 1]
+
+        calibrator = SigmoidCalibrator()
+        calibrator.fit(raw_scores[:50], labels[300:350])
+        probs = calibrator.predict(raw_scores[50:])
+        probs = np.clip(probs, 0.05, 0.95)
+
+        brier = float(np.mean((probs - labels[350:]) ** 2))
+        self.assertLess(brier, 0.25, f"Brier score {brier:.4f} too high — calibration is broken")
 
 
 if __name__ == "__main__":
