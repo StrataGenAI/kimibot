@@ -209,18 +209,25 @@ class IngestionEnabledFlagTests(unittest.TestCase):
     def test_disabled_via_env_exits_without_writing(self) -> None:
         import sys
         sys.path.insert(0, str(Path(__file__).parent.parent))
+        from dataclasses import replace
         from project.configuration import load_config
 
+        base_config = load_config(Path(__file__).parent.parent / "config" / "default.yaml")
+
         with tempfile.TemporaryDirectory() as tmp:
-            config = load_config(Path(__file__).parent.parent / "config" / "default.yaml")
+            tmp_path = Path(tmp)
+            # Redirect data paths into the temp dir so the test is hermetic.
+            data = replace(
+                base_config.data,
+                market_metadata_path=tmp_path / "market_metadata.csv",
+            )
+            config = replace(base_config, data=data)
 
             with patch.dict("os.environ", {"INGESTION_ENABLED": "false"}):
-                # Should return immediately without hanging or writing files.
                 asyncio.run(run_ingestion_loop(config))
 
-            # No ingestion_status.json should have been written.
-            data_dir = Path(config.data.market_metadata_path).parent
-            status_path = data_dir / "ingestion_status.json"
+            # No ingestion_status.json must appear in the redirected data dir.
+            status_path = tmp_path / "ingestion_status.json"
             self.assertFalse(
                 status_path.exists(),
                 "ingestion_status.json must not be written when ingestion is disabled",

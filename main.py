@@ -92,7 +92,6 @@ def run_audit_data(config_path: str) -> None:
 def run_sanity(config_path: str) -> None:
     """Run a quick sanity check on the predictor and write data/sanity_report.json."""
 
-    import numpy as np
     from project.types import FeatureRow
     from models.predictor import LogisticRegressionPredictor, FEATURE_COLUMNS
 
@@ -127,11 +126,19 @@ def run_sanity(config_path: str) -> None:
     failures = []
     all_passed = True
 
+    _SANITY_TS = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    _SANITY_RES_TS = datetime(2026, 1, 2, tzinfo=timezone.utc)
+
     for case in _CASES:
         row = FeatureRow(
             market_id="sanity",
-            timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            **case["features"],
+            timestamp=_SANITY_TS,
+            resolution_time=_SANITY_RES_TS,
+            label=None,
+            values=case["features"],
+            market_source_max_ts=_SANITY_TS,
+            crypto_source_max_ts=_SANITY_TS,
+            schema_version=config.runtime.feature_schema_version,
         )
         p_raw = predictor.predict_raw(row)
         p_cal = predictor.predict(row)

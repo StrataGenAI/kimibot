@@ -206,5 +206,46 @@ class BalancedCalibrationTests(unittest.TestCase):
         self.assertLess(brier, 0.25, f"Brier score {brier:.4f} too high — calibration is broken")
 
 
+class SanityFeatureRowConstructionTests(unittest.TestCase):
+    """Verify run_sanity builds FeatureRow correctly (no TypeError on construction)."""
+
+    def test_feature_row_constructed_with_values_dict(self) -> None:
+        from datetime import timezone
+
+        ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        features = {c: 0.5 for c in FEATURE_COLUMNS}
+
+        # This is exactly how run_sanity constructs rows — must not raise.
+        row = FeatureRow(
+            market_id="sanity",
+            timestamp=ts,
+            resolution_time=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            label=None,
+            values=features,
+            market_source_max_ts=ts,
+            crypto_source_max_ts=ts,
+            schema_version="v2",
+        )
+
+        self.assertEqual(row.market_id, "sanity")
+        self.assertIsNone(row.label)
+        self.assertEqual(row.values["p_market"], 0.5)
+        # Predictor must be able to read values without KeyError.
+        for col in FEATURE_COLUMNS:
+            self.assertIn(col, row.values)
+
+    def test_feature_row_rejects_flat_feature_kwargs(self) -> None:
+        from datetime import timezone
+
+        ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        # Spreading features as kwargs must raise TypeError — confirms the old bug is gone.
+        with self.assertRaises(TypeError):
+            FeatureRow(  # type: ignore[call-arg]
+                market_id="sanity",
+                timestamp=ts,
+                p_market=0.5,  # feature key passed directly, not in values={}
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
