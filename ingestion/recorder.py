@@ -76,22 +76,35 @@ class ParquetRecorder:
 
         if frame.empty:
             return frame.copy(), frame.copy()
-        ordered = frame.sort_values([key_column, "timestamp"]).copy()
-        keep_mask: list[bool] = []
-        for _, row in ordered.iterrows():
-            key = f"{dataset}:{row[key_column]}"
-            current = pd.Timestamp(parse_utc_timestamp(row["timestamp"]))
-            previous = self.last_timestamp_by_stream.get(key)
-            if previous is not None and current <= previous:
-                keep_mask.append(False)
-                continue
-            self.last_timestamp_by_stream[key] = current
-            keep_mask.append(True)
-        filtered = ordered[pd.Series(keep_mask, index=ordered.index)].copy()
-        rejected = ordered[~pd.Series(keep_mask, index=ordered.index)].copy()
+        ordered = frame.sort_values([key_column, "timestamp"]).reset_index(drop=True).copy()
+        # Pre-parse all timestamps in one pass to avoid per-row overhead inside the loop.
+        ts_ns: list[int] = [
+            pd.Timestamp(parse_utc_timestamp(v)).value for v in ordered["timestamp"]
+        ]
+        keep: list[bool] = [False] * len(ordered)
+        _ts_min = pd.Timestamp.min.value
+
+        for key, group in ordered.groupby(key_column, sort=True):
+            stream_key = f"{dataset}:{key}"
+            prev = self.last_timestamp_by_stream.get(stream_key)
+            prev_ns: int = int(pd.Timestamp(prev).value) if prev is not None else _ts_min
+            running_max = prev_ns
+
+            for idx in group.index:
+                current = ts_ns[idx]
+                if current > running_max:
+                    keep[idx] = True
+                    running_max = current
+
+            if running_max > prev_ns:
+                self.last_timestamp_by_stream[stream_key] = pd.Timestamp(running_max, unit="ns", tz="UTC")
+
+        keep_series = pd.Series(keep)
+        filtered = ordered[keep_series].reset_index(drop=True)
+        rejected = ordered[~keep_series].copy()
         if not rejected.empty:
             rejected["validation_error"] = "non_monotonic_timestamp"
-        return filtered.reset_index(drop=True), rejected.reset_index(drop=True)
+        return filtered, rejected.reset_index(drop=True)
 
     @staticmethod
     def _log_rejections(dataset: str, rejected: pd.DataFrame) -> None:
@@ -130,19 +143,25 @@ class RawReplayStore:
         """Return Limitless rows with timestamps less than or equal to the cutoff."""
 
         cutoff = pd.Timestamp(parse_utc_timestamp(timestamp))
-        frame = self.read_all_market_data(market_ids)
+        frame = self._read_partitioned(
+            self.root / "limitless", market_ids, "market_id", max_date=cutoff.strftime("%Y-%m-%d")
+        )
         if frame.empty:
             return frame
-        return frame[frame["event_time"] <= cutoff].sort_values(["event_time", "market_id"]).reset_index(drop=True)
+        normalized = self._normalize_raw_times(frame).sort_values(["event_time", "market_id"]).reset_index(drop=True)
+        return normalized[normalized["event_time"] <= cutoff].sort_values(["event_time", "market_id"]).reset_index(drop=True)
 
     def get_crypto_data_until(self, timestamp, symbols: list[str] | None = None) -> pd.DataFrame:
         """Return crypto rows with timestamps less than or equal to the cutoff."""
 
         cutoff = pd.Timestamp(parse_utc_timestamp(timestamp))
-        frame = self.read_all_crypto_data(symbols)
+        frame = self._read_partitioned(
+            self.root / "crypto", symbols, "symbol", max_date=cutoff.strftime("%Y-%m-%d")
+        )
         if frame.empty:
             return frame
-        return frame[frame["event_time"] <= cutoff].sort_values(["event_time", "symbol"]).reset_index(drop=True)
+        normalized = self._normalize_raw_times(frame).sort_values(["event_time", "symbol"]).reset_index(drop=True)
+        return normalized[normalized["event_time"] <= cutoff].sort_values(["event_time", "symbol"]).reset_index(drop=True)
 
     def get_market_data_grid(self, market_id: str, start, end, frequency: str = "10s") -> pd.DataFrame:
         """Return a resampled fixed-grid view of a market with forward-filled prices."""
@@ -223,22 +242,37 @@ class RawReplayStore:
                 failures.append({"cutoff": pd.Timestamp(cutoff).isoformat(), "max_returned": max_ts.isoformat()})
         return {"dataset": dataset, "samples": sample_size, "failures": len(failures), "passed": len(failures) == 0, "examples": failures[:3]}
 
-    def _read_partitioned(self, dataset_root: Path, keys: list[str] | None, key_column: str) -> pd.DataFrame:
-        """Read Parquet files from partitioned raw storage."""
+    def _read_partitioned(
+        self,
+        dataset_root: Path,
+        keys: list[str] | None,
+        key_column: str,
+        max_date: str | None = None,
+    ) -> pd.DataFrame:
+        """Read Parquet files from partitioned raw storage.
+
+        When max_date is provided (YYYY-MM-DD), date partitions strictly after
+        that date are skipped entirely, avoiding unnecessary I/O.
+        """
 
         if not dataset_root.exists():
             return pd.DataFrame()
         frames: list[pd.DataFrame] = []
-        candidate_dirs = []
+        candidate_dirs: list[Path] = []
         if keys:
             candidate_dirs = [dataset_root / f"{key_column}={key}" for key in keys]
         else:
-            candidate_dirs = [path for path in dataset_root.iterdir() if path.is_dir()]
+            candidate_dirs = sorted(p for p in dataset_root.iterdir() if p.is_dir())
         for candidate in candidate_dirs:
             if not candidate.exists():
                 continue
-            for file_path in sorted(candidate.rglob("*.parquet")):
-                frames.append(pd.read_parquet(file_path))
+            for date_dir in sorted(candidate.iterdir()):
+                if not date_dir.is_dir() or not date_dir.name.startswith("date="):
+                    continue
+                if max_date is not None and date_dir.name[5:] > max_date:
+                    continue
+                for file_path in sorted(date_dir.glob("*.parquet")):
+                    frames.append(pd.read_parquet(file_path))
         if not frames:
             return pd.DataFrame()
         return pd.concat(frames, ignore_index=True)

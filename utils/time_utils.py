@@ -15,11 +15,19 @@ def ensure_utc(ts: datetime) -> datetime:
     return ts.astimezone(timezone.utc)
 
 
-def parse_utc_timestamp(value: str | datetime | pd.Timestamp) -> datetime:
-    """Parse arbitrary timestamp values into UTC datetimes."""
+def parse_utc_timestamp(value: str | int | float | datetime | pd.Timestamp) -> datetime:
+    """Parse arbitrary timestamp values into UTC datetimes.
+
+    Integers and floats are treated as Unix epoch seconds.
+    Callers must not pass NaN; use na_action='ignore' in pandas .map() calls.
+    """
 
     if isinstance(value, datetime):
         return ensure_utc(value)
+    if isinstance(value, (int, float)):
+        if value != value:  # NaN check without importing math
+            raise ValueError("Cannot parse NaN as a UTC timestamp")
+        return ensure_utc(datetime.fromtimestamp(float(value), timezone.utc))
     return ensure_utc(pd.Timestamp(value).to_pydatetime())
 
 

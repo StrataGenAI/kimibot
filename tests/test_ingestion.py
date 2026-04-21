@@ -98,5 +98,108 @@ class IngestionPipelineTests(unittest.TestCase):
             self.assertLessEqual(pd.to_datetime(market_frame["timestamp"], utc=True).max(), pd.Timestamp("2026-01-01T00:00:03Z"))
 
 
+class ParseUtcTimestampTests(unittest.TestCase):
+    """Validate parse_utc_timestamp handles all supported input types."""
+
+    def test_iso_string(self) -> None:
+        from utils.time_utils import parse_utc_timestamp
+        from datetime import timezone
+
+        result = parse_utc_timestamp("2026-01-01T00:00:00Z")
+        self.assertEqual(result.year, 2026)
+        self.assertEqual(result.tzinfo, timezone.utc)
+
+    def test_unix_seconds_int(self) -> None:
+        from utils.time_utils import parse_utc_timestamp
+        from datetime import timezone
+
+        epoch_seconds = 1_609_459_200  # 2021-01-01 00:00:00 UTC
+        result = parse_utc_timestamp(epoch_seconds)
+        self.assertEqual(result.year, 2021)
+        self.assertEqual(result.tzinfo, timezone.utc)
+
+    def test_unix_seconds_float(self) -> None:
+        from utils.time_utils import parse_utc_timestamp
+
+        result = parse_utc_timestamp(1_609_459_200.5)
+        self.assertEqual(result.year, 2021)
+
+    def test_nan_raises(self) -> None:
+        from utils.time_utils import parse_utc_timestamp
+
+        with self.assertRaises(ValueError):
+            parse_utc_timestamp(float("nan"))
+
+
+class PartitionPruningTests(unittest.TestCase):
+    """Validate that get_*_data_until skips date partitions beyond the cutoff."""
+
+    def test_skips_future_date_partitions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            recorder = ParquetRecorder(root)
+
+            day1_row = {
+                "market_id": "m1",
+                "timestamp": parse_utc_timestamp("2026-01-01T12:00:00Z"),
+                "yes_price": 0.5,
+                "volume": 100.0,
+                "liquidity": 1000.0,
+                "source": "test",
+                "ingested_at": parse_utc_timestamp("2026-01-01T12:00:00Z"),
+            }
+            day2_row = {
+                "market_id": "m1",
+                "timestamp": parse_utc_timestamp("2026-01-02T12:00:00Z"),
+                "yes_price": 0.6,
+                "volume": 200.0,
+                "liquidity": 1100.0,
+                "source": "test",
+                "ingested_at": parse_utc_timestamp("2026-01-02T12:00:00Z"),
+            }
+            recorder.append_limitless([day1_row])
+            recorder.append_limitless([day2_row])
+
+            replay = RawReplayStore(root)
+            # Cutoff is end of day 1 — day 2 partition should be skipped entirely.
+            result = replay.get_market_data_until("2026-01-01T23:59:59Z", ["m1"])
+            self.assertEqual(len(result), 1)
+            self.assertAlmostEqual(float(result.iloc[0]["yes_price"]), 0.5)
+
+    def test_cross_batch_monotonicity_is_enforced(self) -> None:
+        """Recorder should reject rows that go backward in time across batches."""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            recorder = ParquetRecorder(root)
+
+            first = [
+                {
+                    "market_id": "m1",
+                    "timestamp": parse_utc_timestamp("2026-01-01T00:00:10Z"),
+                    "yes_price": 0.55,
+                    "volume": 100.0,
+                    "liquidity": 1000.0,
+                    "source": "test",
+                    "ingested_at": parse_utc_timestamp("2026-01-01T00:00:10Z"),
+                }
+            ]
+            stale = [
+                {
+                    "market_id": "m1",
+                    "timestamp": parse_utc_timestamp("2026-01-01T00:00:05Z"),  # older
+                    "yes_price": 0.50,
+                    "volume": 80.0,
+                    "liquidity": 900.0,
+                    "source": "test",
+                    "ingested_at": parse_utc_timestamp("2026-01-01T00:00:05Z"),
+                }
+            ]
+            accepted1, rejected1 = recorder.append_limitless(first)
+            accepted2, rejected2 = recorder.append_limitless(stale)
+            self.assertEqual(accepted1, 1)
+            self.assertEqual(rejected2, 1)  # stale row must be rejected
+
+
 if __name__ == "__main__":
     unittest.main()

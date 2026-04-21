@@ -9,12 +9,13 @@ import logging
 import random
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from project.configuration import IngestionConfig
-from utils.time_utils import parse_utc_timestamp, utc_now
+from utils.time_utils import utc_now
 
 
 LOGGER = logging.getLogger(__name__)
@@ -39,12 +40,16 @@ class CryptoClient:
         for symbol in target_symbols:
             try:
                 payload = self._request_json(f"/api/v3/ticker/24hr?symbol={symbol}")
+                close_time_ms = payload.get("closeTime")
+                ts = (
+                    datetime.fromtimestamp(close_time_ms / 1000.0, timezone.utc)
+                    if close_time_ms is not None
+                    else utc_now()
+                )
                 rows.append(
                     {
                         "symbol": symbol,
-                        "timestamp": parse_utc_timestamp(
-                            payload.get("closeTime") or utc_now()
-                        ),
+                        "timestamp": ts,
                         "price": float(payload["lastPrice"]),
                         "volume": float(payload.get("volume") or 0.0),
                         "source": "crypto_rest",
