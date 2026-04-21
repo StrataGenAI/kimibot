@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
-from ingestion.recorder import ParquetRecorder, RawReplayStore
+from ingestion.recorder import ParquetRecorder, RawReplayStore, run_ingestion_loop
 from utils.time_utils import parse_utc_timestamp
 from utils.validation import validate_crypto_rows, validate_limitless_rows
 
@@ -199,6 +201,30 @@ class PartitionPruningTests(unittest.TestCase):
             accepted2, rejected2 = recorder.append_limitless(stale)
             self.assertEqual(accepted1, 1)
             self.assertEqual(rejected2, 1)  # stale row must be rejected
+
+
+class IngestionEnabledFlagTests(unittest.TestCase):
+    """run_ingestion_loop should exit immediately when INGESTION_ENABLED=false."""
+
+    def test_disabled_via_env_exits_without_writing(self) -> None:
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from project.configuration import load_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = load_config(Path(__file__).parent.parent / "config" / "default.yaml")
+
+            with patch.dict("os.environ", {"INGESTION_ENABLED": "false"}):
+                # Should return immediately without hanging or writing files.
+                asyncio.run(run_ingestion_loop(config))
+
+            # No ingestion_status.json should have been written.
+            data_dir = Path(config.data.market_metadata_path).parent
+            status_path = data_dir / "ingestion_status.json"
+            self.assertFalse(
+                status_path.exists(),
+                "ingestion_status.json must not be written when ingestion is disabled",
+            )
 
 
 if __name__ == "__main__":

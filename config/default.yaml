@@ -41,6 +41,7 @@ runtime:
   live_sim_sleep_seconds: 0.0
   log_level: INFO
   feature_schema_version: v2
+  ingestion_enabled: true
 
 validation:
   stress_slippage_multiplier: 2.0
@@ -58,7 +59,7 @@ validation:
 
 calibration:
   method: sigmoid
-  min_calibration_markets: 1
+  min_calibration_markets: 3
   min_calibration_rows: 4
   target_ece: 0.05
 

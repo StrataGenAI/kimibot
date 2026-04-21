@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import random
 import uuid
 from dataclasses import dataclass, field
+from datetime import timezone
 from pathlib import Path
 
 import pandas as pd
@@ -295,8 +298,20 @@ class RawReplayStore:
         return normalized
 
 
+def _write_ingestion_status(status_path: Path, limitless: dict, crypto: dict) -> None:
+    status = {"limitless": limitless, "crypto": crypto}
+    tmp = status_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(status, indent=2))
+    tmp.replace(status_path)
+
+
 async def run_ingestion_loop(config: AppConfig) -> None:
     """Run the continuous market and crypto ingestion loop."""
+
+    enabled_env = os.environ.get("INGESTION_ENABLED", str(config.runtime.ingestion_enabled))
+    if enabled_env.strip().lower() in ("false", "0", "no"):
+        LOGGER.info("Ingestion disabled (INGESTION_ENABLED=%s) — loop exiting.", enabled_env)
+        return
 
     limitless_client = LimitlessClient(config.ingestion)
     crypto_client = CryptoClient(config.ingestion)
@@ -304,7 +319,15 @@ async def run_ingestion_loop(config: AppConfig) -> None:
     market_queue: asyncio.Queue = asyncio.Queue()
     active_market_ids: list[str] = []
 
+    status_path = Path(config.data.market_metadata_path).parent / "ingestion_status.json"
+    limitless_status: dict = {"last_fetch_utc": None, "rows_accepted": 0, "rows_rejected": 0}
+    crypto_status: dict = {"last_fetch_utc": None, "rows_accepted": 0, "rows_rejected": 0}
+
+    def _now_utc_str() -> str:
+        return utc_now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     async def discovery_loop() -> None:
+        nonlocal limitless_status
         while True:
             try:
                 markets = limitless_client.list_active_markets()
@@ -312,6 +335,14 @@ async def run_ingestion_loop(config: AppConfig) -> None:
                 if active_market_ids:
                     snapshots = limitless_client.fetch_market_snapshots(active_market_ids)
                     recorder.append_limitless(snapshots)
+                    count = len(snapshots) if isinstance(snapshots, list) else len(snapshots) if hasattr(snapshots, "__len__") else 0
+                    limitless_status = {"last_fetch_utc": _now_utc_str(), "rows_accepted": count, "rows_rejected": 0}
+                    _write_ingestion_status(status_path, limitless_status, crypto_status)
+                    LOGGER.info(
+                        '{"event":"limitless_flush","rows_accepted":%d,"markets":%d}',
+                        count,
+                        len(active_market_ids),
+                    )
             except Exception as exc:  # pragma: no cover - network path
                 LOGGER.exception("Market discovery loop failed: %s", exc)
             await asyncio.sleep(config.ingestion.limitless_discovery_interval_seconds)
@@ -328,6 +359,7 @@ async def run_ingestion_loop(config: AppConfig) -> None:
                 await asyncio.sleep(config.ingestion.limitless_poll_interval_seconds)
 
     async def queue_flush_loop() -> None:
+        nonlocal limitless_status
         buffer: list[dict[str, object]] = []
         while True:
             try:
@@ -337,13 +369,22 @@ async def run_ingestion_loop(config: AppConfig) -> None:
                 pass
             if buffer:
                 recorder.append_limitless(buffer)
+                count = len(buffer)
+                limitless_status = {"last_fetch_utc": _now_utc_str(), "rows_accepted": count, "rows_rejected": 0}
+                _write_ingestion_status(status_path, limitless_status, crypto_status)
+                LOGGER.info('{"event":"queue_flush","rows_accepted":%d}', count)
                 buffer = []
 
     async def crypto_loop() -> None:
+        nonlocal crypto_status
         while True:
             try:
                 rows = crypto_client.fetch_quotes()
                 recorder.append_crypto(rows)
+                count = len(rows) if isinstance(rows, list) else len(rows) if hasattr(rows, "__len__") else 0
+                crypto_status = {"last_fetch_utc": _now_utc_str(), "rows_accepted": count, "rows_rejected": 0}
+                _write_ingestion_status(status_path, limitless_status, crypto_status)
+                LOGGER.info('{"event":"crypto_flush","rows_accepted":%d}', count)
             except Exception as exc:  # pragma: no cover - network path
                 LOGGER.exception("Crypto ingestion loop failed: %s", exc)
             await asyncio.sleep(config.ingestion.crypto_poll_interval_seconds)

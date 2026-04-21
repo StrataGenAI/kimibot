@@ -77,6 +77,7 @@ class RuntimeConfig:
     live_sim_sleep_seconds: float = 0.0
     log_level: str = "INFO"
     feature_schema_version: str = "v2"
+    ingestion_enabled: bool = True
 
 
 @dataclass(frozen=True)
