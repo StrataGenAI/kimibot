@@ -4,7 +4,7 @@ import { SignalTable } from "@/components/tables/SignalTable";
 import { MarketDetail } from "@/components/MarketDetail";
 import { QuickTradePanel } from "@/components/QuickTradePanel";
 import { useStore } from "@/lib/store";
-import { useSignalPolling, usePortfolioPolling } from "@/lib/hooks";
+import { useSignalPolling, usePortfolioPolling, useHealthPolling } from "@/lib/hooks";
 import { fmtDollar, pnlColor, cn } from "@/lib/utils";
 
 function SectionHeader({ title, sub }: { title: string; sub?: string }) {
@@ -24,14 +24,18 @@ function Panel({ children, className }: { children: React.ReactNode; className?:
   );
 }
 
+const MIN_SETTLED_TRADES = 30;
+
 export default function DashboardPage() {
   useSignalPolling();
   usePortfolioPolling();
+  useHealthPolling();
 
-  const { signals, portfolio } = useStore();
+  const { signals, portfolio, health } = useStore();
 
   const buySignals = signals.filter((s) => s.signal !== "HOLD").length;
-  const totalPnl = (portfolio?.realized_pnl ?? 0) + (portfolio?.unrealized_pnl ?? 0);
+  const settledTradeCount = health?.trade_count ?? 0;
+  const realizedPnlValid = settledTradeCount >= MIN_SETTLED_TRADES;
 
   return (
     <div className="flex flex-col gap-4 h-full">
@@ -47,10 +51,23 @@ export default function DashboardPage() {
           <div className={cn("font-mono font-semibold text-lg", buySignals > 0 ? "text-green" : "text-text-secondary")}>{buySignals}</div>
         </div>
         <div className="w-px h-8 bg-border" />
-        <div>
-          <div className="text-2xs text-text-secondary uppercase tracking-wider">Total PnL</div>
-          <div className={cn("font-mono font-semibold text-lg tabular-num", pnlColor(totalPnl))}>
-            {fmtDollar(totalPnl)}
+        <div
+          data-tooltip={realizedPnlValid ? undefined : `Only realized after markets resolve. Need ${MIN_SETTLED_TRADES}+ settled trades.`}
+        >
+          <div className="text-2xs text-text-secondary uppercase tracking-wider">Realized PnL</div>
+          {realizedPnlValid ? (
+            <div className={cn("font-mono font-semibold text-lg tabular-num", pnlColor(portfolio?.realized_pnl ?? 0))}>
+              {fmtDollar(portfolio?.realized_pnl ?? 0)}
+            </div>
+          ) : (
+            <div className="font-mono font-semibold text-lg tabular-num text-text-muted">N/A</div>
+          )}
+        </div>
+        <div className="w-px h-8 bg-border" />
+        <div data-tooltip="Mark-to-market change on open positions. Not locked in until settlement.">
+          <div className="text-2xs text-text-secondary uppercase tracking-wider">Unrealized PnL</div>
+          <div className={cn("font-mono font-semibold text-lg tabular-num", pnlColor(portfolio?.unrealized_pnl ?? 0))}>
+            {fmtDollar(portfolio?.unrealized_pnl ?? 0)}
           </div>
         </div>
         {portfolio && (

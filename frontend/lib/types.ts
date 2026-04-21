@@ -109,4 +109,7 @@ export interface HealthData {
   scaler_loaded: boolean;
   calibrator_loaded: boolean;
   training_metadata: Record<string, unknown> | null;
+  ingestion_status: Record<string, unknown> | null;
+  brier_score: number | null;
+  ece: number | null;
 }
