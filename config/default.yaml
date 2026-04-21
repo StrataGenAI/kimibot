@@ -1,0 +1,91 @@
+data:
+  market_metadata_path: data/market_metadata.csv
+  market_snapshots_path: data/market_snapshots.csv
+  crypto_snapshots_path: data/crypto_snapshots.csv
+  raw_storage_root: data/raw
+  audit_report_path: data/audit_report.json
+  feature_cache_path: data/feature_cache.csv
+  trade_log_path: data/trade_log.csv
+  metrics_report_path: data/metrics_report.json
+  prediction_report_path: data/predictions.csv
+  validation_report_path: data/validation_report.json
+  model_artifact_path: models/logistic_regression.pkl
+  scaler_artifact_path: models/standard_scaler.pkl
+  calibrator_artifact_path: models/probability_calibrator.pkl
+  training_metadata_path: models/training_metadata.json
+
+trading:
+  initial_capital: 10000.0
+  edge_threshold: 0.005
+  min_edge: 0.005
+  max_edge: 0.20
+  min_expected_value: 0.001
+  trade_cooldown_seconds: 0
+  min_liquidity: 200.0
+  max_position_per_market: 600.0
+  max_total_exposure: 3500.0
+  daily_loss_limit: 800.0
+  fee_rate: 0.01
+  slippage_bps: 40.0
+  latency_seconds: 2.0
+  price_velocity_lookback_minutes: 2
+  position_size_multiplier: 0.10
+  trade_cooldown_seconds: 60
+
+walk_forward:
+  min_resolved_markets: 5
+  test_markets_per_fold: 10
+  min_training_rows: 2
+
+runtime:
+  live_sim_sleep_seconds: 0.0
+  log_level: INFO
+  feature_schema_version: v2
+
+validation:
+  stress_slippage_multiplier: 2.0
+  stress_fee_multiplier: 2.0
+  stress_liquidity_haircut: 0.5
+  shuffle_seed: 17
+  shuffle_repeats: 5
+  holdout_test_markets: 5
+  calibration_bins: 5
+  calibration_tolerance: 0.15
+  min_trade_count: 50
+  warn_sharpe_threshold: 3.0
+  warn_win_rate_threshold: 0.80
+  warn_concentration_threshold: 0.30
+
+calibration:
+  method: sigmoid
+  min_calibration_markets: 1
+  min_calibration_rows: 4
+  target_ece: 0.05
+
+ingestion:
+  limitless_rest_base_url: https://api.limitless.exchange
+  limitless_ws_url: wss://ws.limitless.exchange
+  limitless_api_key: "{{LIMITLESS_API_KEY}}"
+  limitless_private_key: "{{LIMITLESS_PRIVATE_KEY}}"
+  limitless_discovery_interval_seconds: 10
+  limitless_poll_interval_seconds: 2
+  crypto_rest_base_url: https://api.binance.com
+  binance_api_key: "{{BINANCE_API_KEY}}"
+  binance_api_secret: "{{BINANCE_API_SECRET}}"
+  crypto_poll_interval_seconds: 1
+  flush_interval_seconds: 5
+  retry_base_delay_seconds: 1.0
+  retry_max_delay_seconds: 16.0
+  market_allowlist: []
+  market_denylist: []
+
+audit:
+  resample_frequency: 10s
+  expected_market_interval_seconds: 10
+  expected_crypto_interval_seconds: 5
+  gap_threshold_seconds: 30
+  alignment_threshold_seconds: 3
+  replay_integrity_samples: 10
+  price_jump_threshold: 0.3
+  lifecycle_late_only_ratio: 0.5
+  realistic_fill_fraction: 0.15
