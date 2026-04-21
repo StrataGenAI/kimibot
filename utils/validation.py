@@ -25,7 +25,7 @@ def validate_limitless_rows(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
     if frame.empty:
         return frame.copy(), frame.copy()
     normalized = frame.copy()
-    normalized["timestamp"] = normalized["timestamp"].map(parse_utc_timestamp)
+    normalized["timestamp"] = normalized["timestamp"].map(parse_utc_timestamp, na_action="ignore")
     critical = ["market_id", "timestamp", "yes_price", "volume", "liquidity"]
     valid_mask = normalized[critical].notnull().all(axis=1)
     valid, rejected = _split_valid_invalid(normalized, valid_mask, "null_critical_field")
@@ -50,7 +50,7 @@ def validate_crypto_rows(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFram
     if frame.empty:
         return frame.copy(), frame.copy()
     normalized = frame.copy()
-    normalized["timestamp"] = normalized["timestamp"].map(parse_utc_timestamp)
+    normalized["timestamp"] = normalized["timestamp"].map(parse_utc_timestamp, na_action="ignore")
     critical = ["symbol", "timestamp", "price"]
     valid_mask = normalized[critical].notnull().all(axis=1)
     valid, rejected = _split_valid_invalid(normalized, valid_mask, "null_critical_field")

@@ -6,25 +6,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from datetime import datetime, timezone
-
 from project.configuration import AppConfig
-
-
-def parse_utc_timestamp(value):
-    """Parse timestamp from ISO-8601 string or Unix epoch integer into UTC."""
-
-    if isinstance(value, (int, float)):
-        return ensure_utc(datetime.fromtimestamp(value, timezone.utc))
-    return ensure_utc(pd.Timestamp(value).to_pydatetime())
-
-
-def ensure_utc(ts: datetime) -> datetime:
-    """Normalize a datetime to timezone-aware UTC."""
-
-    if ts.tzinfo is None:
-        return ts.replace(tzinfo=timezone.utc)
-    return ts.astimezone(timezone.utc)
+from utils.time_utils import parse_utc_timestamp
 
 
 @dataclass
