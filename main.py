@@ -173,6 +173,80 @@ def run_sanity(config_path: str) -> None:
     print(f"\nSANITY PASSED: all {len(cases_out)} cases in [0.05, 0.95]")
 
 
+def run_evaluate_limitless(config_path: str) -> None:
+    """Run the Limitless historical ingestion and walk-forward evaluation."""
+
+    import os
+    from ingestion.limitless_historical import run_historical_ingestion
+    from ingestion.binance_historical import ensure_btc_data, build_crypto_history
+    from evaluation.walk_forward_evaluator import run_evaluation
+    from evaluation.report_generator import generate_report, generate_charts
+    from datetime import datetime, timezone
+
+    config = load_config(config_path)
+    configure_logging(config.runtime.log_level)
+
+    graph_api_key = config.ingestion.graph_api_key or os.environ.get("GRAPH_API_KEY", "")
+    if not graph_api_key:
+        print(
+            "ERROR: GRAPH_API_KEY is required.\n"
+            "Get a free key at https://thegraph.com/studio/apikeys\n"
+            "Set it as: export GRAPH_API_KEY=your_key_here",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Step 1: Ingest resolved markets
+    print("Step 1/4: Ingesting resolved Limitless markets...")
+    markets = run_historical_ingestion(
+        graph_api_key=graph_api_key,
+        min_trades=20,
+    )
+    print(f"  Loaded {len(markets)} resolved markets")
+
+    if len(markets) < 10:
+        print(f"ERROR: Only {len(markets)} markets found. Need at least 10.", file=sys.stderr)
+        sys.exit(1)
+
+    # Step 2: Ensure BTC data
+    print("Step 2/4: Ensuring BTC price data is cached...")
+    all_timestamps = []
+    for m in markets:
+        for t in m["trades"]:
+            all_timestamps.append(t["timestamp"])
+    if all_timestamps:
+        data_start = datetime.fromtimestamp(min(all_timestamps), tz=timezone.utc)
+        data_end = datetime.fromtimestamp(max(all_timestamps), tz=timezone.utc)
+        ensure_btc_data(data_start, data_end)
+        print(f"  BTC data covers {data_start.date()} to {data_end.date()}")
+        crypto_df = build_crypto_history(data_start, data_end)
+        print(f"  Loaded {len(crypto_df):,} BTC 1-minute bars")
+    else:
+        print("ERROR: No trade timestamps found in market data.", file=sys.stderr)
+        sys.exit(1)
+
+    # Step 3: Run evaluation
+    print("Step 3/4: Running walk-forward evaluation...")
+    results = run_evaluation(markets=markets, crypto_df=crypto_df)
+
+    delta = results["headline"]["delta_brier_vs_market"]
+    beats = results["headline"]["model_beats_market"]
+    print(f"\n{'='*50}")
+    print(f"RESULT: Model Brier = {results['model']['brier_score']:.4f}")
+    print(f"        Market Brier = {results['market_baseline']['brier_score']:.4f}")
+    print(f"        Delta = {delta:+.4f} ({'model beats market' if beats else 'model loses to market'})")
+    print(f"{'='*50}\n")
+
+    # Step 4: Generate reports
+    print("Step 4/4: Generating reports...")
+    generate_report(results)
+    generate_charts(results)
+
+    print("\nDone. See EVALUATION_REPORT.md and reports/")
+    print(f"Test markets: {results['dataset']['test_markets']}")
+    print(f"Test snapshots: {results['dataset']['test_snapshots']}")
+
+
 def main() -> None:
     """Parse CLI arguments and dispatch to the requested mode."""
 
@@ -181,7 +255,7 @@ def main() -> None:
     )
     parser.add_argument(
         "mode",
-        choices=["backtest", "live-sim", "validate", "ingest", "audit-data", "sanity"],
+        choices=["backtest", "live-sim", "validate", "ingest", "audit-data", "sanity", "evaluate-limitless"],
         help="Execution mode.",
     )
     parser.add_argument(
@@ -230,6 +304,8 @@ def main() -> None:
         run_audit_data(args.config)
     elif args.mode == "sanity":
         run_sanity(args.config)
+    elif args.mode == "evaluate-limitless":
+        run_evaluate_limitless(args.config)
     else:
         run_live_sim(args.config)
 
