@@ -110,6 +110,7 @@ class IngestionConfig:
     limitless_ws_url: str = ""
     limitless_api_key: str = ""
     limitless_private_key: str = ""
+    graph_api_key: str = ""
     limitless_discovery_interval_seconds: int = 10
     limitless_poll_interval_seconds: int = 2
     crypto_rest_base_url: str = "https://api.binance.com"

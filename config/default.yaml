@@ -68,6 +68,7 @@ ingestion:
   limitless_ws_url: wss://ws.limitless.exchange
   limitless_api_key: "{{LIMITLESS_API_KEY}}"
   limitless_private_key: "{{LIMITLESS_PRIVATE_KEY}}"
+  graph_api_key: "{{GRAPH_API_KEY}}"
   limitless_discovery_interval_seconds: 10
   limitless_poll_interval_seconds: 2
   crypto_rest_base_url: https://api.binance.com
