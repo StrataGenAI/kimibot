@@ -7,12 +7,13 @@ import logging
 import threading
 import time
 from typing import Any
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 LOGGER = logging.getLogger(__name__)
 
 _SUBGRAPH_ID = "BLkZxK4Zn8FnrfQdNbZ5Vim98hNy2efq2z7QVnse8VrB"
-_GATEWAY_BASE = "https://gateway.thegraph.com/api/{api_key}/subgraphs/id/" + _SUBGRAPH_ID
+_GATEWAY_BASE = "https://gateway.thegraph.com/api/subgraphs/id/" + _SUBGRAPH_ID
 
 _RESOLVED_MARKETS_GQL = """
 query ResolvedMarkets($skip: Int!, $first: Int!) {
@@ -89,7 +90,8 @@ class SubgraphClient:
                 "GRAPH_API_KEY is required. Get a free key at thegraph.com/studio/apikeys "
                 "and set it as the GRAPH_API_KEY environment variable."
             )
-        self._endpoint = _GATEWAY_BASE.format(api_key=api_key)
+        self._api_key = api_key
+        self._endpoint = _GATEWAY_BASE
         self._bucket = TokenBucket(rate=rate_per_second)
 
     def query(self, gql: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -99,10 +101,21 @@ class SubgraphClient:
         req = Request(
             self._endpoint,
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self._api_key}",
+            },
         )
-        with urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read())
+        try:
+            with urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read())
+        except HTTPError as exc:
+            if exc.code == 403:
+                raise RuntimeError(
+                    "The Graph gateway returned 403 Forbidden. "
+                    "Check that GRAPH_API_KEY is valid and the subgraph is deployed on the decentralized network."
+                ) from exc
+            raise
         if "errors" in result:
             raise RuntimeError(f"GraphQL errors: {result['errors']}")
         return result["data"]
