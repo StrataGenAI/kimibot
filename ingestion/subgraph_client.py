@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 LOGGER = logging.getLogger(__name__)
 
 _SUBGRAPH_ID = "BLkZxK4Zn8FnrfQdNbZ5Vim98hNy2efq2z7QVnse8VrB"
-_GATEWAY_BASE = "https://gateway.thegraph.com/api/subgraphs/id/" + _SUBGRAPH_ID
+_GATEWAY_BASE = "https://gateway.thegraph.com/api"
 
 _RESOLVED_MARKETS_GQL = """
 query ResolvedMarkets($skip: Int!, $first: Int!) {
@@ -91,7 +91,7 @@ class SubgraphClient:
                 "and set it as the GRAPH_API_KEY environment variable."
             )
         self._api_key = api_key
-        self._endpoint = _GATEWAY_BASE
+        self._endpoint = f"{_GATEWAY_BASE}/{api_key}/subgraphs/id/{_SUBGRAPH_ID}"
         self._bucket = TokenBucket(rate=rate_per_second)
 
     def query(self, gql: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -103,7 +103,6 @@ class SubgraphClient:
             data=payload,
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {self._api_key}",
             },
         )
         try:
