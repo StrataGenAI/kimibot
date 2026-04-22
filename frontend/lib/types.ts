@@ -113,3 +113,59 @@ export interface HealthData {
   brier_score: number | null;
   ece: number | null;
 }
+
+export interface WalkForwardMarketSet {
+  train_markets: number;
+  calib_markets: number;
+  test_markets: number;
+  train_snapshots: number;
+  test_snapshots: number;
+  train_date_range: [string, string];
+  test_date_range: [string, string];
+  total_markets: number;
+}
+
+export interface WalkForwardModel {
+  brier_score: number;
+  brier_ci_95: [number, number];
+  ece: number;
+  log_loss: number;
+  auc: number;
+  accuracy_at_0_5: number;
+}
+
+export interface WalkForwardBaseline {
+  brier_score: number;
+  brier_ci_95: [number, number];
+  ece: number;
+  log_loss: number;
+  auc: number;
+}
+
+export interface WalkForwardHeadline {
+  delta_brier_vs_market: number;
+  model_beats_market: boolean;
+  model_beats_trivial: boolean;
+}
+
+export interface ReliabilityPoint {
+  bin_center: number;
+  mean_pred: number;
+  fraction_positive: number;
+  count: number;
+}
+
+export interface WalkForwardData {
+  generated_at: string;
+  run_id: string;
+  dataset: WalkForwardMarketSet;
+  model: WalkForwardModel;
+  market_baseline: WalkForwardBaseline;
+  trivial_baseline: { brier_score: number };
+  headline: WalkForwardHeadline;
+  diagnostics: {
+    reliability_diagram_data: ReliabilityPoint[];
+    top_10_disagreements: unknown[];
+    top_10_confident_wrong: unknown[];
+  };
+}
