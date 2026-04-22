@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
 
+from ingestion.filters import is_crypto_market
 from ingestion.subgraph_client import SubgraphClient, TokenBucket
+from project.configuration import IngestionConfig
 
 LOGGER = logging.getLogger(__name__)
 
@@ -85,9 +87,8 @@ def _parse_resolution_time(market_payload: dict[str, Any]) -> datetime | None:
 
 def run_historical_ingestion(
     graph_api_key: str,
-    min_trades: int = 20,
+    ingestion_config: IngestionConfig,
     cache_dir: Path = RAW_DIR,
-    rate_per_second: float = 1.0,
 ) -> list[dict[str, Any]]:
     """
     Enumerate resolved Limitless markets and cache raw data to disk.
@@ -97,16 +98,30 @@ def run_historical_ingestion(
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    client = SubgraphClient(api_key=graph_api_key, rate_per_second=rate_per_second)
+    cfg = ingestion_config
+    min_trades = cfg.historical_min_trades
 
-    LOGGER.info("Enumerating resolved markets from subgraph...")
-    conditions = client.get_all_resolved_markets(min_trades=min_trades)
-    LOGGER.info("Found %d candidate resolved markets", len(conditions))
+    client = SubgraphClient(
+        api_key=graph_api_key,
+        rate_per_second=cfg.subgraph_rate_per_second,
+    )
+
+    LOGGER.info(
+        "Enumerating resolved markets from subgraph (min_trades>=%d, resolved_since=%d)...",
+        min_trades, cfg.historical_resolved_since_unix,
+    )
+    conditions = client.get_all_resolved_markets(
+        min_trades=min_trades,
+        resolved_since_unix=cfg.historical_resolved_since_unix,
+    )
+    LOGGER.info("Found %d candidate resolved markets (server-filtered)", len(conditions))
 
     markets: list[dict[str, Any]] = []
     success = 0
     skipped = 0
     cached_hits = 0
+    non_crypto_dropped = 0
+    crypto_kept = 0
 
     for i, cond in enumerate(conditions):
         condition_id = cond["id"]
@@ -115,8 +130,18 @@ def run_historical_ingestion(
         if cache_path.exists():
             try:
                 cached = json.loads(cache_path.read_text())
-                markets.append(cached)
-                cached_hits += 1
+                # Re-apply crypto filter against cached slug so old caches from
+                # pre-filter runs don't leak non-crypto markets into training.
+                if is_crypto_market(
+                    cached.get("slug"),
+                    cfg.crypto_ticker_allowlist,
+                    mode=cfg.crypto_filter_mode,
+                ):
+                    markets.append(cached)
+                    cached_hits += 1
+                    crypto_kept += 1
+                else:
+                    non_crypto_dropped += 1
                 continue
             except Exception:
                 pass  # Re-fetch if cache is corrupt
@@ -140,6 +165,16 @@ def run_historical_ingestion(
             rt = _parse_resolution_time(rest_meta)
             if rt:
                 resolution_time_utc = rt.isoformat()
+
+        # Apply crypto filter BEFORE the expensive trade fetch.
+        if not is_crypto_market(
+            slug,
+            cfg.crypto_ticker_allowlist,
+            mode=cfg.crypto_filter_mode,
+        ):
+            non_crypto_dropped += 1
+            continue
+        crypto_kept += 1
 
         # Fall back to subgraph resolvedAt if REST doesn't have resolution time
         if resolution_time_utc is None:
@@ -185,10 +220,14 @@ def run_historical_ingestion(
         success += 1
 
         LOGGER.info(
-            "Cached market %s: label=%d, %d trades, resolved=%s",
-            condition_id, label, len(trades), resolution_time_utc,
+            "Cached market %s: slug=%s label=%d, %d trades, resolved=%s",
+            condition_id, slug, label, len(trades), resolution_time_utc,
         )
 
+    LOGGER.info(
+        "historical filter: subgraph_returned=%d crypto_kept=%d non_crypto_dropped=%d",
+        len(conditions), crypto_kept, non_crypto_dropped,
+    )
     LOGGER.info(
         "Ingestion complete: %d cached hits, %d newly fetched, %d skipped",
         cached_hits, success, skipped,

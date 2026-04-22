@@ -33,3 +33,4 @@ frontend/tsconfig.tsbuildinfo
 
 # Nested repos / not part of this project
 ruflo-repo/
+backups/

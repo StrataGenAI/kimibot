@@ -335,6 +335,26 @@ def run_sanity(config_path: str) -> None:
     print(f"\nSANITY PASSED: all {len(cases_out)} cases in [0.05, 0.95]")
 
 
+def run_scan_resolutions(config_path: str, *, dry_run: bool = False) -> None:
+    """Run one pass of the resolution scanner."""
+
+    import json as _json
+    from ingestion.resolution_scanner import scan_resolutions
+
+    config = load_config(config_path)
+    configure_logging(config.runtime.log_level)
+
+    report = scan_resolutions(config, dry_run=dry_run)
+    payload = report.as_dict()
+    payload["dry_run"] = bool(dry_run)
+    print(_json.dumps(payload, indent=2, default=str))
+
+    # Zero resolutions is a legitimate success (idle cycle).
+    if report.errors and report.resolved == 0 and report.fetched == 0:
+        # Total failure (e.g. network down) should exit non-zero.
+        sys.exit(2)
+
+
 def run_evaluate_limitless(config_path: str) -> None:
     """Run the Limitless historical ingestion and walk-forward evaluation."""
 
@@ -362,9 +382,9 @@ def run_evaluate_limitless(config_path: str) -> None:
     print("Step 1/4: Ingesting resolved Limitless markets...")
     markets = run_historical_ingestion(
         graph_api_key=graph_api_key,
-        min_trades=20,
+        ingestion_config=config.ingestion,
     )
-    print(f"  Loaded {len(markets)} resolved markets")
+    print(f"  Loaded {len(markets)} resolved crypto markets")
 
     if len(markets) < 10:
         print(f"ERROR: Only {len(markets)} markets found. Need at least 10.", file=sys.stderr)
@@ -417,7 +437,7 @@ def main() -> None:
     )
     parser.add_argument(
         "mode",
-        choices=["backtest", "live-sim", "validate", "ingest", "audit-data", "sanity", "evaluate-limitless"],
+        choices=["backtest", "live-sim", "validate", "ingest", "audit-data", "sanity", "evaluate-limitless", "scan-resolutions"],
         help="Execution mode.",
     )
     parser.add_argument(
@@ -431,6 +451,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--mock", action="store_true", help="Force mock mode (ignore API keys)."
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Dry run for scan-resolutions — performs fetches but skips the parquet write.",
     )
     args = parser.parse_args()
 
@@ -468,6 +493,8 @@ def main() -> None:
         run_sanity(args.config)
     elif args.mode == "evaluate-limitless":
         run_evaluate_limitless(args.config)
+    elif args.mode == "scan-resolutions":
+        run_scan_resolutions(args.config, dry_run=args.dry_run)
     else:
         run_live_sim(args.config)
 

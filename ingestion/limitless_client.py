@@ -17,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 import websockets
 
+from ingestion.filters import is_crypto_market
 from project.configuration import IngestionConfig
 from utils.time_utils import parse_utc_timestamp, utc_now
 
@@ -115,26 +116,18 @@ class LimitlessClient:
         """Return True iff the market's slug begins with a known crypto ticker.
 
         Limitless does not expose a reliable category field or native filter
-        (verified empirically 2026-04-22). Slug shape is consistently
-        ``<ticker>-<...>`` for price markets, so we anchor the match to the
-        slug start. Unknown slugs are rejected; rejections are logged at
-        DEBUG to make list tuning easy.
+        (verified empirically 2026-04-22). Delegates to ``ingestion.filters``
+        so the historical path can apply the same rule.
         """
-
-        mode = self.config.crypto_filter_mode
-        if mode == "off":
-            return True
-        slug = str(market.get("slug") or "").lower()
-        if not slug:
-            return False
-        for ticker in self.config.crypto_ticker_allowlist:
-            t = str(ticker).lower()
-            if not t:
-                continue
-            if slug == t or slug.startswith(f"{t}-"):
-                return True
-        LOGGER.debug("crypto filter rejected slug=%s", slug)
-        return False
+        slug = market.get("slug")
+        keep = is_crypto_market(
+            slug,
+            self.config.crypto_ticker_allowlist,
+            mode=self.config.crypto_filter_mode,
+        )
+        if not keep:
+            LOGGER.debug("crypto filter rejected slug=%s", slug)
+        return keep
 
     @staticmethod
     def _unwrap_list(payload: Any) -> list[dict[str, Any]]:
@@ -261,6 +254,22 @@ class LimitlessClient:
         if isinstance(raw, pd.Timestamp):
             return raw.tz_convert("UTC") if raw.tzinfo else raw.tz_localize("UTC")
         return pd.NaT
+
+    def fetch_market_by_slug(self, slug: str) -> dict[str, Any]:
+        """Fetch the raw ``/markets/{slug}`` payload.
+
+        Used by the resolution scanner to extract fields
+        (``winningOutcomeIndex``, ``categories``, ``conditionId``, ...)
+        that ``_normalize_snapshot`` discards. Callers must handle
+        network errors themselves.
+        """
+
+        payload = self._request_json(f"/markets/{slug}")
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"Unexpected payload shape for /markets/{slug}: {type(payload).__name__}"
+            )
+        return payload
 
     def fetch_market_snapshots(self, market_ids: list[str]) -> list[dict[str, Any]]:
         """Fetch market snapshots over REST for polling fallback or bootstrap."""

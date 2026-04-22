@@ -142,6 +142,16 @@ class IngestionConfig:
     # Safety cap on snapshot fetches per cycle (protects against a large
     # universe when crypto_filter_mode=off).
     max_snapshots_per_cycle: int = 300
+    # Historical (subgraph) backfill scope. min_trades drops abandoned
+    # markets; resolved_since limits the universe to the modern era
+    # (default 2025-01-01 UTC).
+    historical_min_trades: int = 20
+    historical_resolved_since_unix: int = 1735689600
+    subgraph_rate_per_second: float = 5.0
+    # Resolution scanner: how often to poll /markets/{slug} per second.
+    # Conservative 2/s — the scanner runs every 10 minutes and is not
+    # latency sensitive.
+    resolution_scanner_rate_per_second: float = 2.0
 
     def __post_init__(self):
         if self.market_allowlist is None:
