@@ -1,5 +1,6 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import { useAnalyticsPolling } from "@/lib/hooks";
 import { useStore } from "@/lib/store";
 import { MetricCard } from "@/components/cards/MetricCard";
@@ -10,6 +11,109 @@ import { EdgeHistogram } from "@/components/charts/EdgeHistogram";
 import { TradeList } from "@/components/tables/TradeList";
 import { fmtPct, fmt } from "@/lib/utils";
 import { AlertTriangle, CheckCircle } from "lucide-react";
+import type { WalkForwardData, ReliabilityPoint } from "@/lib/types";
+
+function ReliabilityDiagram({ data }: { data: ReliabilityPoint[] }) {
+  if (!data || data.length === 0) return <p className="text-text-secondary text-sm">No reliability data.</p>;
+  const maxCount = Math.max(...data.map(d => d.count));
+  return (
+    <div className="relative h-48 w-full">
+      <svg viewBox="0 0 200 200" className="w-full h-full">
+        <line x1="20" y1="180" x2="180" y2="20" stroke="#4b5563" strokeWidth="1" strokeDasharray="4,4" />
+        <line x1="20" y1="180" x2="180" y2="180" stroke="#374151" strokeWidth="1" />
+        <line x1="20" y1="20" x2="20" y2="180" stroke="#374151" strokeWidth="1" />
+        {data.map((d, i) => {
+          const cx = 20 + d.mean_pred * 160;
+          const cy = 180 - d.fraction_positive * 160;
+          const r = Math.max(3, (d.count / maxCount) * 10);
+          return (
+            <circle key={i} cx={cx} cy={cy} r={r} fill="#2563eb" opacity={0.75}>
+              <title>{`Pred: ${d.mean_pred.toFixed(2)}, Actual: ${d.fraction_positive.toFixed(2)}, n=${d.count}`}</title>
+            </circle>
+          );
+        })}
+        <text x="100" y="198" textAnchor="middle" fontSize="8" fill="#9ca3af">Mean Predicted Prob</text>
+        <text x="10" y="100" textAnchor="middle" fontSize="8" fill="#9ca3af" transform="rotate(-90,10,100)">Fraction Positive</text>
+      </svg>
+    </div>
+  );
+}
+
+function WalkForwardPanel() {
+  const [data, setData] = useState<WalkForwardData | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch("/api/walk-forward")
+      .then(r => r.json())
+      .then(d => {
+        if (d.error) setError(d.error);
+        else setData(d);
+      })
+      .catch(() => setError("Failed to load walk-forward results"))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return <div className="skeleton h-32 rounded-xl" />;
+  if (error) return (
+    <div className="bg-bg-surface border border-border rounded-xl p-4 text-text-secondary text-sm">
+      Walk-Forward Evaluation not yet run. Execute: <code className="font-mono text-xs">python main.py evaluate-limitless</code>
+    </div>
+  );
+  if (!data) return null;
+
+  const { headline, model, market_baseline, dataset } = data;
+  const beatsBadge = headline.model_beats_market
+    ? <span className="text-green text-xs font-semibold">Beats Market</span>
+    : <span className="text-red text-xs font-semibold">Loses to Market</span>;
+
+  return (
+    <div className="bg-bg-surface border border-border rounded-xl overflow-hidden">
+      <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+        <div>
+          <h3 className="text-md font-semibold text-text-primary">Walk-Forward Evaluation (Real Limitless Data)</h3>
+          <p className="text-2xs text-text-secondary mt-0.5">
+            {dataset.test_markets} test markets · {dataset.test_snapshots.toLocaleString()} snapshots · {data.dataset.test_date_range[0].slice(0,10)} – {data.dataset.test_date_range[1].slice(0,10)}
+          </p>
+        </div>
+        {beatsBadge}
+      </div>
+      <div className="p-4 grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div>
+          <div className="text-2xs text-text-secondary uppercase tracking-wider mb-1">Model Brier</div>
+          <div className="font-mono font-semibold text-text-primary">{model.brier_score.toFixed(4)}</div>
+          <div className="text-2xs text-text-secondary">CI [{model.brier_ci_95[0].toFixed(4)}, {model.brier_ci_95[1].toFixed(4)}]</div>
+        </div>
+        <div>
+          <div className="text-2xs text-text-secondary uppercase tracking-wider mb-1">Market Brier</div>
+          <div className="font-mono font-semibold text-text-primary">{market_baseline.brier_score.toFixed(4)}</div>
+          <div className="text-2xs text-text-secondary">CI [{market_baseline.brier_ci_95[0].toFixed(4)}, {market_baseline.brier_ci_95[1].toFixed(4)}]</div>
+        </div>
+        <div>
+          <div className="text-2xs text-text-secondary uppercase tracking-wider mb-1">Delta vs Market</div>
+          <div className={`font-mono font-semibold ${headline.delta_brier_vs_market > 0 ? "text-green" : "text-red"}`}>
+            {headline.delta_brier_vs_market > 0 ? "+" : ""}{headline.delta_brier_vs_market.toFixed(4)}
+          </div>
+          <div className="text-2xs text-text-secondary">Brier improvement</div>
+        </div>
+        <div>
+          <div className="text-2xs text-text-secondary uppercase tracking-wider mb-1">Model AUC</div>
+          <div className="font-mono font-semibold text-text-primary">{model.auc.toFixed(4)}</div>
+          <div className="text-2xs text-text-secondary">ECE: {model.ece.toFixed(4)}</div>
+        </div>
+      </div>
+      <div className="px-4 pb-4">
+        <div className="text-2xs text-text-secondary mb-2">Reliability Diagram (bubble size = sample count)</div>
+        <ReliabilityDiagram data={data.diagnostics.reliability_diagram_data} />
+      </div>
+      <div className="px-4 pb-4 text-2xs text-text-secondary">
+        Train: {dataset.train_markets} markets · Calibrate: {dataset.calib_markets} markets · Test: {dataset.test_markets} markets
+        · Run ID: {data.run_id}
+      </div>
+    </div>
+  );
+}
 
 export default function AnalyticsPage() {
   useAnalyticsPolling();
@@ -149,6 +253,9 @@ export default function AnalyticsPage() {
         </div>
         <TradeList trades={analytics?.trades ?? []} maxRows={50} />
       </div>
+
+      {/* Walk-Forward Evaluation */}
+      <WalkForwardPanel />
     </div>
   );
 }
