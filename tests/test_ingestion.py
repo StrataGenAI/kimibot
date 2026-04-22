@@ -234,5 +234,169 @@ class IngestionEnabledFlagTests(unittest.TestCase):
             )
 
 
+class IngestionConfigDefaultsTests(unittest.TestCase):
+    """Pagination and crypto-filter defaults on IngestionConfig."""
+
+    def test_defaults_include_pagination_and_filter(self) -> None:
+        from project.configuration import IngestionConfig
+
+        cfg = IngestionConfig()
+        self.assertEqual(cfg.pagination_page_size, 25)
+        self.assertAlmostEqual(cfg.pagination_delay_seconds, 0.2)
+        self.assertEqual(cfg.pagination_max_pages, 50)
+        self.assertEqual(cfg.crypto_filter_mode, "auto")
+        self.assertIsInstance(cfg.crypto_ticker_allowlist, list)
+        self.assertIn("btc", cfg.crypto_ticker_allowlist)
+        self.assertIn("eth", cfg.crypto_ticker_allowlist)
+        self.assertEqual(cfg.max_snapshots_per_cycle, 300)
+
+    def test_empty_allowlist_seeded_from_yaml_defaults(self) -> None:
+        """An empty list from YAML should be replaced with the curated set."""
+        from project.configuration import IngestionConfig
+
+        cfg = IngestionConfig(crypto_ticker_allowlist=[])
+        self.assertIn("btc", cfg.crypto_ticker_allowlist)
+
+    def test_explicit_allowlist_preserved(self) -> None:
+        from project.configuration import IngestionConfig
+
+        cfg = IngestionConfig(crypto_ticker_allowlist=["foo", "bar"])
+        self.assertEqual(cfg.crypto_ticker_allowlist, ["foo", "bar"])
+
+
+class LimitlessPaginationTests(unittest.TestCase):
+    """Pagination loop in list_active_markets."""
+
+    @staticmethod
+    def _client(pages, *, max_pages=10, total=None, filter_mode="off"):
+        from ingestion.limitless_client import LimitlessClient
+        from project.configuration import IngestionConfig
+
+        cfg = IngestionConfig(
+            limitless_rest_base_url="https://example.test",
+            pagination_page_size=2,
+            pagination_delay_seconds=0.0,
+            pagination_max_pages=max_pages,
+            crypto_filter_mode=filter_mode,
+        )
+        client = LimitlessClient(config=cfg)
+        calls: list[tuple[str, dict]] = []
+
+        declared = sum(len(p) for p in pages) if total is None else total
+
+        def fake(path, query=None):
+            calls.append((path, dict(query or {})))
+            idx = (query or {}).get("page", 1) - 1
+            items = pages[idx] if 0 <= idx < len(pages) else []
+            return {"data": items, "totalMarketsCount": declared}
+
+        client._request_json = fake  # type: ignore[assignment]
+        return client, calls
+
+    def test_stops_on_short_page(self) -> None:
+        pages = [
+            [{"market_id": "1", "slug": "btc-100k"}, {"market_id": "2", "slug": "eth-5k"}],
+            [{"market_id": "3", "slug": "sol-500"}],
+        ]
+        client, calls = self._client(pages)
+        out = client.list_active_markets()
+        self.assertEqual(len(out), 3)
+        self.assertEqual(len(calls), 2)
+
+    def test_stops_on_total_reached(self) -> None:
+        pages = [
+            [{"market_id": "1", "slug": "btc-100k"}, {"market_id": "2", "slug": "eth-5k"}],
+        ]
+        client, calls = self._client(pages, total=2)
+        out = client.list_active_markets()
+        self.assertEqual(len(out), 2)
+        self.assertEqual(len(calls), 1)
+
+    def test_respects_max_pages_cap(self) -> None:
+        pages = [
+            [
+                {"market_id": str(i), "slug": f"btc-{i}"},
+                {"market_id": str(i + 100), "slug": f"eth-{i}"},
+            ]
+            for i in range(20)
+        ]
+        client, calls = self._client(pages, max_pages=3, total=999)
+        out = client.list_active_markets()
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(out), 6)
+
+
+class LimitlessCryptoFilterTests(unittest.TestCase):
+    """Slug-based crypto filter."""
+
+    @staticmethod
+    def _client(mode="auto"):
+        from ingestion.limitless_client import LimitlessClient
+        from project.configuration import IngestionConfig
+
+        return LimitlessClient(config=IngestionConfig(crypto_filter_mode=mode))
+
+    def test_keeps_known_crypto_slugs(self) -> None:
+        c = self._client()
+        for slug in [
+            "btc-above-dollar7922541-on-apr-22-1630-utc-1776874511835",
+            "eth-above-dollar240539-on-apr-22-1630-utc-1776874512313",
+            "sol-above-dollar8828-on-apr-22-1630-utc-1776874511936",
+            "xrp-above-dollar14547-on-apr-22-1630-utc-1776874512314",
+            "doge-price-on-apr-22-1700-utc-1776873600476",
+            "mnt-above-dollar062899-on-apr-22-1900-utc-1776798002244",
+        ]:
+            self.assertTrue(c._is_crypto_market({"slug": slug}), slug)
+
+    def test_rejects_non_crypto_slugs(self) -> None:
+        c = self._client()
+        for slug in [
+            "tesla-tsla-above-dollar39119-on-apr-22-1700-utc-1776873966697",
+            "nvidia-nvda-above-dollar20120-on-apr-22-1700-utc-1776873606041",
+            "oil-ukoilspot-above-dollar97130-on-apr-22-1700-utc-1776873606107",
+            "gold-paxg-above-dollar471612-on-apr-22-1700-utc-1776873604597",
+            "south-america-rejects-vs-alis-ventorus-1776794410266",
+            "aerospace-and-defense-etf-ita-above-dollar22287",
+        ]:
+            self.assertFalse(c._is_crypto_market({"slug": slug}), slug)
+
+    def test_mode_off_keeps_everything(self) -> None:
+        c = self._client(mode="off")
+        self.assertTrue(c._is_crypto_market({"slug": "chiefs-win-super-bowl"}))
+
+
+class LimitlessSnapshotCapTests(unittest.TestCase):
+    """max_snapshots_per_cycle guards against runaway fetches."""
+
+    def test_caps_iteration_and_warns(self) -> None:
+        import logging as _logging
+
+        from ingestion.limitless_client import LimitlessClient
+        from project.configuration import IngestionConfig
+
+        client = LimitlessClient(config=IngestionConfig(max_snapshots_per_cycle=5))
+        call_count = {"n": 0}
+
+        def fake_req(path, query=None):
+            call_count["n"] += 1
+            return {"market_id": path}
+
+        def fake_norm(payload, market_id):
+            return {"market_id": market_id}
+
+        client._request_json = fake_req  # type: ignore[assignment]
+        client._normalize_snapshot = fake_norm  # type: ignore[assignment]
+
+        ids = [str(i) for i in range(20)]
+        with self.assertLogs("ingestion.limitless_client", level=_logging.WARNING) as cm:
+            out = client.fetch_market_snapshots(ids)
+        self.assertEqual(call_count["n"], 5)
+        self.assertEqual(len(out), 5)
+        self.assertTrue(
+            any("max_snapshots_per_cycle" in msg for msg in cm.output),
+            cm.output,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

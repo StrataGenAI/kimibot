@@ -42,9 +42,11 @@ function readCSV(relPath: string): Record<string, string>[] {
 }
 
 export async function GET() {
-  // 1. Read latest prediction per market (prefer baseline, fall back to root)
-  let preds = readCSV("baseline/predictions.csv");
-  if (preds.length === 0) preds = readCSV("predictions.csv");
+  // 1. Read latest prediction per market. Prefer root (live infer_only
+  //    writes here); fall back to baseline/ which holds historical
+  //    validation artifacts.
+  let preds = readCSV("predictions.csv");
+  if (preds.length === 0) preds = readCSV("baseline/predictions.csv");
 
   // 2. Get latest prediction per market
   const latestPred = new Map<string, Record<string, string>>();

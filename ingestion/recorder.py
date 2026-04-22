@@ -326,12 +326,20 @@ async def run_ingestion_loop(config: AppConfig) -> None:
     def _now_utc_str() -> str:
         return utc_now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    metadata_sidecar_path = (
+        Path(config.data.raw_storage_root) / "limitless" / "market_metadata.parquet"
+    )
+
     async def discovery_loop() -> None:
         nonlocal limitless_status
         while True:
             try:
                 markets = limitless_client.list_active_markets()
                 active_market_ids[:] = [market["market_id"] for market in markets]
+                if markets:
+                    limitless_client.upsert_metadata_sidecar(
+                        markets, metadata_sidecar_path
+                    )
                 if active_market_ids:
                     snapshots = limitless_client.fetch_market_snapshots(active_market_ids)
                     recorder.append_limitless(snapshots)

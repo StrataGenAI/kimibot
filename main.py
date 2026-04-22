@@ -41,10 +41,15 @@ def run_backtest(config_path: str) -> None:
 
 
 def run_live_sim(config_path: str) -> None:
-    """Run a simulated live loop over the historical replay source."""
+    """Run a simulated live loop over the configured data source."""
 
     config = load_config(config_path)
     configure_logging(config.runtime.log_level)
+    mode = getattr(config.runtime, "live_sim_mode", "walk_forward")
+    if mode == "infer_only":
+        _run_live_sim_infer_only(config)
+        return
+
     bundle = DataStore(config).load()
     feature_store = FeatureStore(
         config.data.feature_cache_path, config.runtime.feature_schema_version
@@ -61,6 +66,163 @@ def run_live_sim(config_path: str) -> None:
         if config.runtime.live_sim_sleep_seconds > 0.0:
             time.sleep(config.runtime.live_sim_sleep_seconds)
     print(result.metrics)
+
+
+def _run_live_sim_infer_only(config) -> None:
+    """Load pre-trained artifacts and score every live snapshot.
+
+    This path exists because live Limitless markets have no resolved
+    outcomes yet, so WalkForwardTrainer cannot build folds from them. We
+    load the existing synthetic-fixture-trained model, run it against the
+    live feature stream, and persist predictions + trade intents so the
+    dashboard refreshes on real markets. No training happens here.
+    """
+
+    import logging
+
+    import pandas as pd
+
+    from decision.engine import DecisionEngine
+    from models.predictor import LogisticRegressionPredictor
+    from project.types import PortfolioState, Prediction
+
+    logger = logging.getLogger("main")
+
+    model_path = Path(config.data.model_artifact_path)
+    scaler_path = Path(config.data.scaler_artifact_path)
+    calibrator_path = Path(config.data.calibrator_artifact_path)
+    meta_path = Path(config.data.training_metadata_path)
+    missing = [p for p in (model_path, scaler_path) if not p.exists()]
+    if missing:
+        raise RuntimeError(
+            "live_sim_mode=infer_only requires pre-trained model artifacts. "
+            f"Missing: {', '.join(str(p) for p in missing)}. "
+            "Run `python train.py` first (or drop real artifacts in place)."
+        )
+    predictor = LogisticRegressionPredictor.load(
+        model_path, scaler_path, calibrator_path, meta_path
+    )
+
+    # Each timer tick should produce one prediction per market describing
+    # its CURRENT state. Narrow lookbacks both for speed (parquet is 1 file
+    # per poll; 60K+ crypto files exist after an hour of ingest) and for
+    # semantics (features only look 15m back).
+    store = DataStore(config)
+    snapshots = store.load_market_snapshots(lookback_hours=1)
+    crypto = store.load_crypto_snapshots(lookback_hours=1)
+    metadata = store.load_market_metadata().set_index("market_id")
+
+    feature_builder = FeatureBuilder(config.runtime.feature_schema_version)
+    decision_engine = DecisionEngine(config.trading)
+    portfolio_state = PortfolioState(cash=config.trading.initial_capital)
+
+    predictions_rows: list[dict] = []
+    trade_rows: list[dict] = []
+    skipped_no_meta = 0
+    skipped_insufficient = 0
+
+    history_by_market: dict[str, pd.DataFrame] = {
+        mid: group.sort_values("timestamp")
+        for mid, group in snapshots.groupby("market_id", sort=False)
+    }
+    # Infer-only produces "current state" predictions — one row per market
+    # per tick, scored at its latest snapshot. Replaying all historical
+    # snapshots would write thousands of stale predictions on every run.
+    latest_per_market = (
+        snapshots.sort_values("timestamp")
+        .groupby("market_id", sort=False)
+        .tail(1)
+    )
+
+    for _, row in latest_per_market.iterrows():
+        market_id = str(row["market_id"])
+        if market_id not in metadata.index:
+            skipped_no_meta += 1
+            continue
+        meta_row = metadata.loc[market_id]
+        resolution_time = meta_row["resolution_time"]
+        if pd.isna(resolution_time):
+            skipped_no_meta += 1
+            continue
+        as_of = row["timestamp"]
+        try:
+            feature_row = feature_builder.build_features(
+                market_history=history_by_market[market_id],
+                crypto_history=crypto,
+                as_of=as_of,
+                resolution_time=resolution_time,
+                label=None,
+                market_id=market_id,
+            )
+        except ValueError:
+            skipped_insufficient += 1
+            continue
+
+        p_raw = predictor.predict_raw(feature_row)
+        p_cal = predictor.predict(feature_row)
+        p_market = float(row["p_market"])
+        predictions_rows.append(
+            {
+                "market_id": market_id,
+                "timestamp": as_of.isoformat(),
+                "p_model_raw": p_raw,
+                "p_model_calibrated": p_cal,
+                "p_market": p_market,
+                "label": "",
+            }
+        )
+        prediction = Prediction(
+            market_id=market_id,
+            timestamp=as_of,
+            p_model_raw=p_raw,
+            p_model_calibrated=p_cal,
+            p_market=p_market,
+        )
+        intent = decision_engine.evaluate(
+            prediction,
+            float(row["liquidity"]),
+            portfolio_state,
+            as_of,
+        )
+        trade_rows.append(
+            {
+                "market_id": market_id,
+                "timestamp": as_of.isoformat(),
+                "action": intent.action,
+                "side": intent.side or "",
+                "requested_notional": intent.requested_notional,
+                "expected_value": intent.expected_value,
+                "edge": intent.edge,
+                "reason": intent.reason,
+            }
+        )
+
+    predictions_path = Path(config.data.prediction_report_path)
+    trade_log_path = Path(config.data.trade_log_path)
+    predictions_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(predictions_rows).to_csv(predictions_path, index=False)
+    pd.DataFrame(trade_rows).to_csv(trade_log_path, index=False)
+
+    action_counts = (
+        pd.Series([r["action"] for r in trade_rows]).value_counts().to_dict()
+        if trade_rows
+        else {}
+    )
+    logger.info(
+        "infer_only complete: snapshots=%d predictions=%d skipped_no_meta=%d "
+        "skipped_insufficient=%d actions=%s",
+        len(snapshots),
+        len(predictions_rows),
+        skipped_no_meta,
+        skipped_insufficient,
+        action_counts,
+    )
+    print(
+        f"infer_only: predictions={len(predictions_rows)} "
+        f"skipped_no_meta={skipped_no_meta} "
+        f"skipped_insufficient_history={skipped_insufficient} "
+        f"actions={action_counts}"
+    )
 
 
 def run_validate(config_path: str, validation_mode: str) -> None:

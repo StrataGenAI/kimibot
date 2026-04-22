@@ -44,6 +44,7 @@ class DataConfig:
     scaler_artifact_path: Path
     calibrator_artifact_path: Path
     training_metadata_path: Path
+    source_mode: str = "synthetic"
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,11 @@ class TradingConfig:
     price_velocity_lookback_minutes: int = 2
     position_size_multiplier: float = 0.10
     trade_cooldown_seconds: int = 60
+    # Phase A escape hatch: skip the min_liquidity gate so signals flow while
+    # the Limitless public API exposes no liquidity field. Defaults False so
+    # existing configs retain the safe behavior. MUST be False before live
+    # trading — see ingestion/limitless_client.py::fetch_orderbook_depth.
+    paper_mode_unsafe_liquidity: bool = False
 
 
 @dataclass(frozen=True)
@@ -78,6 +84,7 @@ class RuntimeConfig:
     log_level: str = "INFO"
     feature_schema_version: str = "v2"
     ingestion_enabled: bool = True
+    live_sim_mode: str = "walk_forward"
 
 
 @dataclass(frozen=True)
@@ -111,7 +118,7 @@ class IngestionConfig:
     limitless_api_key: str = ""
     limitless_private_key: str = ""
     graph_api_key: str = ""
-    limitless_discovery_interval_seconds: int = 10
+    limitless_discovery_interval_seconds: int = 60
     limitless_poll_interval_seconds: int = 2
     crypto_rest_base_url: str = "https://api.binance.com"
     binance_api_key: str = ""
@@ -122,12 +129,44 @@ class IngestionConfig:
     retry_max_delay_seconds: float = 16.0
     market_allowlist: list[str] = None
     market_denylist: list[str] = None
+    # Pagination for /markets/active. Limitless enforces server-side page
+    # size (currently 25); page_size is the expected size used to detect
+    # the last page.
+    pagination_page_size: int = 25
+    pagination_delay_seconds: float = 0.2
+    pagination_max_pages: int = 50
+    # Crypto filter. "auto" and "slug_regex" both use the ticker allowlist;
+    # "off" disables filtering (debug only).
+    crypto_filter_mode: str = "auto"
+    crypto_ticker_allowlist: list[str] = None
+    # Safety cap on snapshot fetches per cycle (protects against a large
+    # universe when crypto_filter_mode=off).
+    max_snapshots_per_cycle: int = 300
 
     def __post_init__(self):
         if self.market_allowlist is None:
             object.__setattr__(self, "market_allowlist", [])
         if self.market_denylist is None:
             object.__setattr__(self, "market_denylist", [])
+        if not self.crypto_ticker_allowlist:
+            object.__setattr__(
+                self,
+                "crypto_ticker_allowlist",
+                [
+                    "btc", "bitcoin", "eth", "ethereum", "sol", "solana",
+                    "xrp", "ripple", "doge", "dogecoin", "ada", "cardano",
+                    "avax", "avalanche", "bnb", "hype", "sui", "tao",
+                    "ton", "trx", "tron", "link", "chainlink",
+                    "dot", "polkadot", "matic", "polygon",
+                    "arb", "arbitrum", "op", "optimism",
+                    "atom", "cosmos", "near", "ltc", "litecoin", "bch",
+                    "xlm", "stellar", "uni", "uniswap", "pepe", "shib",
+                    "wif", "bonk", "fet", "inj", "apt", "sei", "tia",
+                    "stx", "mnt", "mantle", "ena", "ondo", "jup", "wld",
+                    "worldcoin", "fil", "filecoin", "icp", "hbar", "vet",
+                    "algo", "xmr", "monero", "etc",
+                ],
+            )
 
 
 @dataclass(frozen=True)
@@ -214,6 +253,7 @@ def load_config(path: str | Path) -> AppConfig:
             training_metadata_path=_resolve_path(
                 base_dir, data["training_metadata_path"]
             ),
+            source_mode=data.get("source_mode", "synthetic"),
         ),
         trading=TradingConfig(**trading),
         walk_forward=WalkForwardConfig(**walk_forward),

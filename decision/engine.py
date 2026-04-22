@@ -29,6 +29,12 @@ class DecisionEngine:
             object.__setattr__(self, "_last_trade_time", {})
         if self._signal_log is None:
             object.__setattr__(self, "_signal_log", [])
+        if getattr(self.config, "paper_mode_unsafe_liquidity", False):
+            LOGGER.warning(
+                "DecisionEngine: paper_mode_unsafe_liquidity=True — "
+                "liquidity gate is DISABLED. Do not interpret paper PnL as "
+                "realistic execution."
+            )
 
     def evaluate(
         self,
@@ -39,18 +45,19 @@ class DecisionEngine:
     ) -> TradeIntent:
         """Produce a trade intent using edge, EV, liquidity, and risk-aware sizing."""
 
-        # Liquidity check
-        if liquidity < self.config.min_liquidity:
-            return TradeIntent(
-                market_id=prediction.market_id,
-                timestamp=prediction.timestamp,
-                action="HOLD",
-                side=None,
-                requested_notional=0.0,
-                expected_value=0.0,
-                edge=0.0,
-                reason="liquidity_below_threshold",
-            )
+        # Liquidity check — bypassed in Phase A paper mode (see config flag).
+        if not getattr(self.config, "paper_mode_unsafe_liquidity", False):
+            if liquidity < self.config.min_liquidity:
+                return TradeIntent(
+                    market_id=prediction.market_id,
+                    timestamp=prediction.timestamp,
+                    action="HOLD",
+                    side=None,
+                    requested_notional=0.0,
+                    expected_value=0.0,
+                    edge=0.0,
+                    reason="insufficient_liquidity",
+                )
 
         # Calculate edges for YES and NO
         edge_yes = prediction.p_model_calibrated - prediction.p_market

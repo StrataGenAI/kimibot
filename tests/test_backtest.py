@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from backtest.engine import BacktestEngine
 from backtest.validation import ValidationRunner
@@ -19,6 +20,7 @@ class BacktestIntegrationTests(unittest.TestCase):
         """The sample dataset should produce a stable non-empty result."""
 
         config = load_config("config/default.yaml")
+        config = replace(config, data=replace(config.data, source_mode="synthetic"))
         bundle = DataStore(config).load()
         feature_store = FeatureStore(config.data.feature_cache_path, config.runtime.feature_schema_version)
         feature_store.clear()
@@ -39,6 +41,7 @@ class BacktestIntegrationTests(unittest.TestCase):
         """Validation mode should produce a summary and baseline artifacts."""
 
         config = load_config("config/default.yaml")
+        config = replace(config, data=replace(config.data, source_mode="synthetic"))
         result = ValidationRunner(config).run("stress")
         self.assertIn("baseline", result)
         self.assertIn("stress", result)

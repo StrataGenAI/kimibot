@@ -13,6 +13,14 @@ data:
   scaler_artifact_path: models/standard_scaler.pkl
   calibrator_artifact_path: models/probability_calibrator.pkl
   training_metadata_path: models/training_metadata.json
+  # source_mode selects where DataStore reads market/crypto data from.
+  #   synthetic → legacy CSV fixtures under data/ (m1–m20 markets)
+  #   live      → parquet under data/raw/limitless and data/raw/crypto
+  # The dashboard reads what DataStore and live-sim produce, so flip this
+  # to "live" to show real Limitless markets. Switch back to "synthetic"
+  # for deterministic test fixtures. The dataclass default is "synthetic"
+  # so old configs behave unchanged.
+  source_mode: live
 
 trading:
   initial_capital: 10000.0
@@ -31,6 +39,12 @@ trading:
   price_velocity_lookback_minutes: 2
   position_size_multiplier: 0.10
   trade_cooldown_seconds: 60
+  # When true, DecisionEngine skips the min_liquidity gate. Required during
+  # Phase A because the Limitless public API does not expose liquidity.
+  # MUST be set to false (and real orderbook-depth fetch implemented — see
+  # ingestion/limitless_client.py::fetch_orderbook_depth) before enabling
+  # live trading.
+  paper_mode_unsafe_liquidity: true
 
 walk_forward:
   min_resolved_markets: 5
@@ -42,6 +56,13 @@ runtime:
   log_level: INFO
   feature_schema_version: v2
   ingestion_enabled: true
+  # live_sim_mode picks the code path for `python main.py live-sim`.
+  #   walk_forward → train fresh folds each run (requires resolved markets)
+  #   infer_only   → load existing model artifacts and skip training
+  # Required when running on live markets (which have no resolved outcomes
+  # yet). Switch back to walk_forward once retraining on real historical
+  # resolved markets (see Option 3 / evaluate-limitless pipeline).
+  live_sim_mode: infer_only
 
 validation:
   stress_slippage_multiplier: 2.0
@@ -65,11 +86,12 @@ calibration:
 
 ingestion:
   limitless_rest_base_url: https://api.limitless.exchange
-  limitless_ws_url: wss://ws.limitless.exchange
+  limitless_ws_url: ""
   limitless_api_key: "{{LIMITLESS_API_KEY}}"
   limitless_private_key: "{{LIMITLESS_PRIVATE_KEY}}"
   graph_api_key: "{{GRAPH_API_KEY}}"
-  limitless_discovery_interval_seconds: 10
+  # 60s (was 10s): discovery now paginates + filters, real work per cycle
+  limitless_discovery_interval_seconds: 60
   limitless_poll_interval_seconds: 2
   crypto_rest_base_url: https://api.binance.com
   binance_api_key: "{{BINANCE_API_KEY}}"
@@ -80,6 +102,18 @@ ingestion:
   retry_max_delay_seconds: 16.0
   market_allowlist: []
   market_denylist: []
+  # Limitless pagination (server enforces page size ~25).
+  pagination_page_size: 25
+  pagination_delay_seconds: 0.2
+  pagination_max_pages: 50
+  # Filter to crypto-price markets only. Modes: auto|slug_regex|off.
+  # "auto" and "slug_regex" match slugs against crypto_ticker_allowlist
+  # (anchored to slug start). "off" disables the filter (debug only).
+  crypto_filter_mode: auto
+  # Empty list → defaulted to top-~60 tickers in IngestionConfig.__post_init__.
+  crypto_ticker_allowlist: []
+  # Safety cap on snapshot fetches per cycle.
+  max_snapshots_per_cycle: 300
 
 audit:
   resample_frequency: 10s

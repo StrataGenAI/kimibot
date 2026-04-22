@@ -55,7 +55,39 @@ class DecisionEngineTests(unittest.TestCase):
         engine = DecisionEngine(config=_make_config(min_liquidity=1000.0))
         intent = engine.evaluate(_make_prediction(), liquidity=499.0, portfolio_state=_make_portfolio(), current_time=NOW)
         self.assertEqual(intent.action, "HOLD")
-        self.assertEqual(intent.reason, "liquidity_below_threshold")
+        self.assertEqual(intent.reason, "insufficient_liquidity")
+
+    def test_liquidity_gate_enforced_by_default(self):
+        # Default paper_mode_unsafe_liquidity=False → zero-liquidity snapshot
+        # is rejected before any edge check runs.
+        engine = DecisionEngine(config=_make_config(min_liquidity=200.0))
+        intent = engine.evaluate(
+            _make_prediction(p_model=0.60, p_market=0.50),
+            liquidity=0.0,
+            portfolio_state=_make_portfolio(),
+            current_time=NOW,
+        )
+        self.assertEqual(intent.action, "HOLD")
+        self.assertEqual(intent.reason, "insufficient_liquidity")
+
+    def test_liquidity_gate_bypassed_when_paper_mode_unsafe(self):
+        # Same zero-liquidity snapshot, but the flag is on → the liquidity
+        # gate is skipped and the edge path runs to completion.
+        engine = DecisionEngine(
+            config=_make_config(
+                min_liquidity=200.0,
+                paper_mode_unsafe_liquidity=True,
+            )
+        )
+        intent = engine.evaluate(
+            _make_prediction(p_model=0.60, p_market=0.50),
+            liquidity=0.0,
+            portfolio_state=_make_portfolio(),
+            current_time=NOW,
+        )
+        self.assertEqual(intent.action, "BUY_YES")
+        self.assertEqual(intent.side, "YES")
+        self.assertNotEqual(intent.reason, "insufficient_liquidity")
 
     def test_hold_when_edge_below_threshold(self):
         # p_model = 0.52, p_market = 0.50 → edge_yes = 0.02, below edge_threshold=0.03

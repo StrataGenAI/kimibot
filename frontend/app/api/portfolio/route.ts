@@ -42,8 +42,8 @@ function readCSV(relPath: string): Record<string, string>[] {
 }
 
 export async function GET() {
-  let trades = readCSV("baseline/trade_log.csv");
-  if (trades.length === 0) trades = readCSV("trade_log.csv");
+  let trades = readCSV("trade_log.csv");
+  if (trades.length === 0) trades = readCSV("baseline/trade_log.csv");
 
   // Compute realized PnL from settlements
   const settlements = trades.filter((r) => r.event === "settlement");

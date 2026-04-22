@@ -112,6 +112,7 @@ export interface HealthData {
   ingestion_status: Record<string, unknown> | null;
   brier_score: number | null;
   ece: number | null;
+  model_provenance: "synthetic_fixtures" | "live" | "unknown";
 }
 
 export interface WalkForwardMarketSet {

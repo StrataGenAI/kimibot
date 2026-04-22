@@ -68,8 +68,9 @@ export async function GET() {
   const lastSnapshotTime = latestCSVTimestamp("market_snapshots.csv");
   const lastCryptoTime = latestCSVTimestamp("crypto_snapshots.csv");
 
-  let lastPredictionTime = latestCSVTimestamp("baseline/predictions.csv");
-  if (!lastPredictionTime) lastPredictionTime = latestCSVTimestamp("predictions.csv");
+  let lastPredictionTime = latestCSVTimestamp("predictions.csv");
+  if (!lastPredictionTime)
+    lastPredictionTime = latestCSVTimestamp("baseline/predictions.csv");
 
   // Prefer ingestion_status.json freshness; fall back to snapshot mtime
   let dataFreshnessSecs: number | null = null;
@@ -101,17 +102,17 @@ export async function GET() {
     }
   } catch { /* */ }
 
-  const predCount = countCSV("baseline/predictions.csv") || countCSV("predictions.csv");
-  const tradeCount = countCSV("baseline/trade_log.csv") || countCSV("trade_log.csv");
+  const predCount = countCSV("predictions.csv") || countCSV("baseline/predictions.csv");
+  const tradeCount = countCSV("trade_log.csv") || countCSV("baseline/trade_log.csv");
 
   // Compute Brier and ECE from predictions where label is known (ground truth available).
   let brierScore: number | null = null;
   let ece: number | null = null;
   try {
-    const predPath = exists(path.join(DATA_DIR, "baseline/predictions.csv"))
-      ? path.join(DATA_DIR, "baseline/predictions.csv")
-      : exists(path.join(DATA_DIR, "predictions.csv"))
+    const predPath = exists(path.join(DATA_DIR, "predictions.csv"))
       ? path.join(DATA_DIR, "predictions.csv")
+      : exists(path.join(DATA_DIR, "baseline/predictions.csv"))
+      ? path.join(DATA_DIR, "baseline/predictions.csv")
       : null;
 
     if (predPath) {
@@ -145,6 +146,19 @@ export async function GET() {
     }
   } catch { /* */ }
 
+  // Derive model provenance from the saved training metadata. Synthetic
+  // fixture markets are m1..m20; a model trained only on those ids has no
+  // bearing on live Limitless performance and the dashboard should say so.
+  let modelProvenance: "synthetic_fixtures" | "live" | "unknown" = "unknown";
+  const trainIds = (trainingMetadata as { train_market_ids?: unknown } | null)
+    ?.train_market_ids;
+  if (Array.isArray(trainIds) && trainIds.length > 0) {
+    const allSynthetic = trainIds.every(
+      (id) => typeof id === "string" && /^m\d+$/.test(id),
+    );
+    modelProvenance = allSynthetic ? "synthetic_fixtures" : "live";
+  }
+
   const data: HealthData = {
     model_loaded: modelLoaded,
     last_prediction_time: lastPredictionTime,
@@ -160,6 +174,7 @@ export async function GET() {
     ingestion_status: ingestionStatus,
     brier_score: brierScore !== null ? Math.round(brierScore * 10000) / 10000 : null,
     ece: ece !== null ? Math.round(ece * 10000) / 10000 : null,
+    model_provenance: modelProvenance,
   };
 
   return NextResponse.json(data);

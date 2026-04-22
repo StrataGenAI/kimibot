@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from features.builder import FeatureBuilder
 from features.store import FeatureStore
@@ -17,7 +18,8 @@ class WalkForwardTests(unittest.TestCase):
     def setUp(self) -> None:
         """Load shared fixtures for walk-forward testing."""
 
-        self.config = load_config("config/default.yaml")
+        cfg = load_config("config/default.yaml")
+        self.config = replace(cfg, data=replace(cfg.data, source_mode="synthetic"))
         self.bundle = DataStore(self.config).load()
         self.feature_store = FeatureStore(self.config.data.feature_cache_path, self.config.runtime.feature_schema_version)
         self.feature_store.clear()

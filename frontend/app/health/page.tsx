@@ -66,6 +66,25 @@ export default function HealthPage() {
 
       {health && (
         <>
+          {/* Honest provenance banner */}
+          {health.model_provenance === "synthetic_fixtures" && (
+            <div
+              role="alert"
+              className="flex items-start gap-3 p-4 rounded-xl border bg-yellow/5 border-yellow/30 text-yellow"
+            >
+              <Activity size={16} className="mt-0.5 shrink-0" />
+              <div className="text-sm leading-snug">
+                <div className="font-semibold">
+                  Model trained on synthetic data
+                </div>
+                <div className="text-xs opacity-80 mt-0.5">
+                  Predictions shown are for plumbing validation only. Retrain
+                  on real historical markets before trading.
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Model artifacts */}
           <Section title="Model Artifacts">
             <StatusRow label="Logistic Regression model" ok={health.model_loaded} icon={Cpu} />

@@ -23,3 +23,13 @@ models/probability_calibrator.pkl
 models/standard_scaler.pkl
 models/training_metadata.json
 .DS_Store
+# Editor/tool internals
+.claude/
+.mcp.json
+frontend/tsconfig.tsbuildinfo
+
+# Stray backups
+*.bak
+
+# Nested repos / not part of this project
+ruflo-repo/
