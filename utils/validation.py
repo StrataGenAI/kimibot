@@ -9,6 +9,11 @@ import pandas as pd
 from utils.time_utils import parse_utc_timestamp
 
 
+# Earliest plausible event timestamp. Anything older is presumed corrupt
+# (Binance returned closeTime=0 once on 2026-04-20, producing 1970 partitions).
+MIN_PLAUSIBLE_TIMESTAMP = pd.Timestamp("2020-01-01T00:00:00Z")
+
+
 def _split_valid_invalid(frame: pd.DataFrame, valid_mask: pd.Series, reason: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Split a frame into valid and rejected rows with a rejection reason."""
 
@@ -17,6 +22,13 @@ def _split_valid_invalid(frame: pd.DataFrame, valid_mask: pd.Series, reason: str
     if not rejected.empty:
         rejected["validation_error"] = reason
     return valid, rejected
+
+
+def _plausible_timestamp_mask(timestamps: pd.Series) -> pd.Series:
+    """Return a boolean mask of rows whose timestamp is at or after the sane epoch."""
+
+    parsed = pd.to_datetime(timestamps, utc=True, errors="coerce")
+    return parsed >= MIN_PLAUSIBLE_TIMESTAMP
 
 
 def validate_limitless_rows(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -32,15 +44,20 @@ def validate_limitless_rows(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
     if valid.empty:
         return valid, pd.concat([rejected], ignore_index=True)
 
-    price_mask = valid["yes_price"].astype(float).between(0.0, 1.0, inclusive="both")
-    valid_price, rejected_price = _split_valid_invalid(valid, price_mask, "invalid_yes_price")
+    plausible_mask = _plausible_timestamp_mask(valid["timestamp"])
+    valid_plausible, rejected_implausible = _split_valid_invalid(valid, plausible_mask, "implausible_timestamp")
+    price_mask = valid_plausible["yes_price"].astype(float).between(0.0, 1.0, inclusive="both")
+    valid_price, rejected_price = _split_valid_invalid(valid_plausible, price_mask, "invalid_yes_price")
     valid_price["volume"] = valid_price["volume"].astype(float)
     valid_price["liquidity"] = valid_price["liquidity"].astype(float)
     non_negative_mask = (valid_price["volume"] >= 0.0) & (valid_price["liquidity"] >= 0.0)
     valid_final, rejected_non_negative = _split_valid_invalid(valid_price, non_negative_mask, "negative_volume_or_liquidity")
     monotonic_mask = valid_final.sort_values(["market_id", "timestamp"]).groupby("market_id")["timestamp"].diff().fillna(pd.Timedelta(seconds=1)) >= pd.Timedelta(0)
     valid_monotonic, rejected_monotonic = _split_valid_invalid(valid_final.sort_values(["market_id", "timestamp"]), monotonic_mask, "non_monotonic_timestamp")
-    rejected_all = pd.concat([rejected, rejected_price, rejected_non_negative, rejected_monotonic], ignore_index=True)
+    rejected_all = pd.concat(
+        [rejected, rejected_implausible, rejected_price, rejected_non_negative, rejected_monotonic],
+        ignore_index=True,
+    )
     return valid_monotonic.reset_index(drop=True), rejected_all.reset_index(drop=True)
 
 
@@ -57,8 +74,10 @@ def validate_crypto_rows(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFram
     if valid.empty:
         return valid, pd.concat([rejected], ignore_index=True)
 
-    price_mask = valid["price"].astype(float) > 0.0
-    valid_price, rejected_price = _split_valid_invalid(valid, price_mask, "invalid_price")
+    plausible_mask = _plausible_timestamp_mask(valid["timestamp"])
+    valid_plausible, rejected_implausible = _split_valid_invalid(valid, plausible_mask, "implausible_timestamp")
+    price_mask = valid_plausible["price"].astype(float) > 0.0
+    valid_price, rejected_price = _split_valid_invalid(valid_plausible, price_mask, "invalid_price")
     if "volume" in valid_price.columns:
         valid_price["volume"] = pd.to_numeric(valid_price["volume"], errors="coerce").fillna(0.0)
         non_negative_mask = valid_price["volume"] >= 0.0
@@ -68,5 +87,8 @@ def validate_crypto_rows(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFram
         rejected_volume = pd.DataFrame(columns=list(valid.columns) + ["validation_error"])
     monotonic_mask = valid_final.sort_values(["symbol", "timestamp"]).groupby("symbol")["timestamp"].diff().fillna(pd.Timedelta(seconds=1)) >= pd.Timedelta(0)
     valid_monotonic, rejected_monotonic = _split_valid_invalid(valid_final.sort_values(["symbol", "timestamp"]), monotonic_mask, "non_monotonic_timestamp")
-    rejected_all = pd.concat([rejected, rejected_price, rejected_volume, rejected_monotonic], ignore_index=True)
+    rejected_all = pd.concat(
+        [rejected, rejected_implausible, rejected_price, rejected_volume, rejected_monotonic],
+        ignore_index=True,
+    )
     return valid_monotonic.reset_index(drop=True), rejected_all.reset_index(drop=True)

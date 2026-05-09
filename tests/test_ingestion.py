@@ -202,6 +202,83 @@ class PartitionPruningTests(unittest.TestCase):
             self.assertEqual(accepted1, 1)
             self.assertEqual(rejected2, 1)  # stale row must be rejected
 
+    def test_validate_limitless_rows_rejects_pre_epoch_timestamps(self) -> None:
+        """Rows with timestamps before the sane epoch (2020-01-01) are rejected."""
+
+        frame = pd.DataFrame(
+            [
+                {"market_id": "m1", "timestamp": "2026-01-01T00:00:00Z", "yes_price": 0.6, "volume": 10, "liquidity": 100},
+                {"market_id": "m2", "timestamp": "1970-01-01T00:00:00Z", "yes_price": 0.6, "volume": 10, "liquidity": 100},
+            ]
+        )
+        valid, rejected = validate_limitless_rows(frame)
+        self.assertEqual(len(valid), 1)
+        self.assertEqual(len(rejected), 1)
+        self.assertIn("validation_error", rejected.columns)
+        self.assertEqual(rejected["validation_error"].iloc[0], "implausible_timestamp")
+
+    def test_validate_crypto_rows_rejects_pre_epoch_timestamps(self) -> None:
+        """Crypto rows with timestamps before 2020-01-01 are rejected."""
+
+        frame = pd.DataFrame(
+            [
+                {"symbol": "BTCUSDT", "timestamp": "2026-01-01T00:00:00Z", "price": 100000.0, "volume": 1.0},
+                {"symbol": "ETHUSDT", "timestamp": "1970-01-01T00:29:36Z", "price": 4000.0, "volume": 2.0},
+            ]
+        )
+        valid, rejected = validate_crypto_rows(frame)
+        self.assertEqual(len(valid), 1)
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected["validation_error"].iloc[0], "implausible_timestamp")
+
+    def test_recorder_separates_validation_and_dedup_counts(self) -> None:
+        """append_limitless_with_stats splits rejections so duplicates aren't reported
+        as data-quality failures (REST polling routinely sees same updated_at)."""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            recorder = ParquetRecorder(root)
+
+            first = [
+                {
+                    "market_id": "m1",
+                    "timestamp": parse_utc_timestamp("2026-01-01T00:00:10Z"),
+                    "yes_price": 0.55,
+                    "volume": 100.0,
+                    "liquidity": 1000.0,
+                    "source": "test",
+                    "ingested_at": parse_utc_timestamp("2026-01-01T00:00:10Z"),
+                }
+            ]
+            recorder.append_limitless(first)
+            stats = recorder.append_limitless_with_stats([first[0]])
+            self.assertEqual(stats["accepted"], 0)
+            self.assertEqual(stats["validation_rejected"], 0)
+            self.assertEqual(stats["dedup_rejected"], 1)
+
+    def test_recorder_separates_validation_and_dedup_counts_validation_failure(self) -> None:
+        """A genuinely invalid row counts as validation_rejected, not dedup_rejected."""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            recorder = ParquetRecorder(root)
+
+            bad_row = [
+                {
+                    "market_id": "m1",
+                    "timestamp": parse_utc_timestamp("2026-01-01T00:00:10Z"),
+                    "yes_price": 1.5,  # out of range -> validation failure
+                    "volume": 100.0,
+                    "liquidity": 1000.0,
+                    "source": "test",
+                    "ingested_at": parse_utc_timestamp("2026-01-01T00:00:10Z"),
+                }
+            ]
+            stats = recorder.append_limitless_with_stats(bad_row)
+            self.assertEqual(stats["accepted"], 0)
+            self.assertEqual(stats["validation_rejected"], 1)
+            self.assertEqual(stats["dedup_rejected"], 0)
+
 
 class IngestionEnabledFlagTests(unittest.TestCase):
     """run_ingestion_loop should exit immediately when INGESTION_ENABLED=false."""

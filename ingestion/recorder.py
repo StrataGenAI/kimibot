@@ -32,24 +32,49 @@ class ParquetRecorder:
     last_timestamp_by_stream: dict[str, pd.Timestamp] = field(default_factory=dict)
 
     def append_limitless(self, rows: list[dict[str, object]]) -> tuple[int, int]:
-        """Validate and append Limitless rows to raw storage."""
+        """Validate and append Limitless rows. Returns (accepted, rejected_total)."""
+
+        stats = self.append_limitless_with_stats(rows)
+        return stats["accepted"], stats["validation_rejected"] + stats["dedup_rejected"]
+
+    def append_limitless_with_stats(self, rows: list[dict[str, object]]) -> dict[str, int]:
+        """Validate and append Limitless rows.
+
+        Returns a dict separating ``validation_rejected`` (real schema/range
+        failures) from ``dedup_rejected`` (rows whose timestamp didn't advance
+        a stream's running max — expected from REST polling).
+        """
 
         frame = pd.DataFrame(rows)
-        valid, rejected = validate_limitless_rows(frame)
-        valid, monotonic_rejected = self._filter_monotonic(valid, "limitless", "market_id")
+        valid, validation_rejected = validate_limitless_rows(frame)
+        valid, dedup_rejected = self._filter_monotonic(valid, "limitless", "market_id")
         self._write_rows(valid, dataset="limitless", key_column="market_id")
-        self._log_rejections("limitless", pd.concat([rejected, monotonic_rejected], ignore_index=True))
-        return len(valid), len(rejected) + len(monotonic_rejected)
+        self._log_rejections("limitless", validation_rejected, dedup_rejected)
+        return {
+            "accepted": len(valid),
+            "validation_rejected": len(validation_rejected),
+            "dedup_rejected": len(dedup_rejected),
+        }
 
     def append_crypto(self, rows: list[dict[str, object]]) -> tuple[int, int]:
-        """Validate and append crypto rows to raw storage."""
+        """Validate and append crypto rows. Returns (accepted, rejected_total)."""
+
+        stats = self.append_crypto_with_stats(rows)
+        return stats["accepted"], stats["validation_rejected"] + stats["dedup_rejected"]
+
+    def append_crypto_with_stats(self, rows: list[dict[str, object]]) -> dict[str, int]:
+        """Validate and append crypto rows. See ``append_limitless_with_stats``."""
 
         frame = pd.DataFrame(rows)
-        valid, rejected = validate_crypto_rows(frame)
-        valid, monotonic_rejected = self._filter_monotonic(valid, "crypto", "symbol")
+        valid, validation_rejected = validate_crypto_rows(frame)
+        valid, dedup_rejected = self._filter_monotonic(valid, "crypto", "symbol")
         self._write_rows(valid, dataset="crypto", key_column="symbol")
-        self._log_rejections("crypto", pd.concat([rejected, monotonic_rejected], ignore_index=True))
-        return len(valid), len(rejected) + len(monotonic_rejected)
+        self._log_rejections("crypto", validation_rejected, dedup_rejected)
+        return {
+            "accepted": len(valid),
+            "validation_rejected": len(validation_rejected),
+            "dedup_rejected": len(dedup_rejected),
+        }
 
     def _write_rows(self, frame: pd.DataFrame, *, dataset: str, key_column: str) -> None:
         """Write validated rows into append-only Parquet partitions."""
@@ -110,12 +135,36 @@ class ParquetRecorder:
         return filtered, rejected.reset_index(drop=True)
 
     @staticmethod
-    def _log_rejections(dataset: str, rejected: pd.DataFrame) -> None:
-        """Log rejected rows without stopping ingestion."""
+    def _log_rejections(
+        dataset: str,
+        validation_rejected: pd.DataFrame,
+        dedup_rejected: pd.DataFrame,
+    ) -> None:
+        """Log rejected rows without stopping ingestion.
 
-        if rejected.empty:
-            return
-        LOGGER.warning("Rejected %s %s rows during validation", len(rejected), dataset)
+        Validation failures (schema/range/timestamp) are real problems and
+        emit a WARNING with the breakdown. Dedup rejections (REST polling
+        returning the same updated_at as last time) are routine and emit at
+        DEBUG so logs remain readable.
+        """
+
+        if not validation_rejected.empty:
+            if "validation_error" in validation_rejected.columns:
+                breakdown = validation_rejected["validation_error"].value_counts().to_dict()
+            else:
+                breakdown = {"unknown": len(validation_rejected)}
+            LOGGER.warning(
+                "Rejected %d %s rows during validation: %s",
+                len(validation_rejected),
+                dataset,
+                breakdown,
+            )
+        if not dedup_rejected.empty:
+            LOGGER.debug(
+                "Deduplicated %d %s rows (already-seen timestamps)",
+                len(dedup_rejected),
+                dataset,
+            )
 
 
 @dataclass
@@ -342,13 +391,20 @@ async def run_ingestion_loop(config: AppConfig) -> None:
                     )
                 if active_market_ids:
                     snapshots = limitless_client.fetch_market_snapshots(active_market_ids)
-                    recorder.append_limitless(snapshots)
-                    count = len(snapshots) if isinstance(snapshots, list) else len(snapshots) if hasattr(snapshots, "__len__") else 0
-                    limitless_status = {"last_fetch_utc": _now_utc_str(), "rows_accepted": count, "rows_rejected": 0}
+                    stats = recorder.append_limitless_with_stats(snapshots)
+                    limitless_status = {
+                        "last_fetch_utc": _now_utc_str(),
+                        "rows_accepted": stats["accepted"],
+                        "rows_rejected": stats["validation_rejected"],
+                        "rows_deduped": stats["dedup_rejected"],
+                    }
                     _write_ingestion_status(status_path, limitless_status, crypto_status)
                     LOGGER.info(
-                        '{"event":"limitless_flush","rows_accepted":%d,"markets":%d}',
-                        count,
+                        '{"event":"limitless_flush","rows_accepted":%d,"rows_rejected":%d,'
+                        '"rows_deduped":%d,"markets":%d}',
+                        stats["accepted"],
+                        stats["validation_rejected"],
+                        stats["dedup_rejected"],
                         len(active_market_ids),
                     )
             except Exception as exc:  # pragma: no cover - network path
@@ -367,20 +423,47 @@ async def run_ingestion_loop(config: AppConfig) -> None:
                 await asyncio.sleep(config.ingestion.limitless_poll_interval_seconds)
 
     async def queue_flush_loop() -> None:
+        """Drain the stream queue, flushing on timeout or when the buffer is full.
+
+        Previously this flushed after every single item arrived (because
+        ``if buffer:`` triggered on each successful ``wait_for``), producing
+        one parquet file per row. Now we accumulate until either the
+        ``flush_interval_seconds`` timeout fires or the buffer reaches
+        ``flush_max_batch`` rows.
+        """
+
         nonlocal limitless_status
+        flush_max_batch = max(64, config.ingestion.max_snapshots_per_cycle)
         buffer: list[dict[str, object]] = []
         while True:
+            should_flush = False
             try:
-                item = await asyncio.wait_for(market_queue.get(), timeout=config.ingestion.flush_interval_seconds)
+                item = await asyncio.wait_for(
+                    market_queue.get(),
+                    timeout=config.ingestion.flush_interval_seconds,
+                )
                 buffer.append(item)
+                if len(buffer) >= flush_max_batch:
+                    should_flush = True
             except asyncio.TimeoutError:
-                pass
-            if buffer:
-                recorder.append_limitless(buffer)
-                count = len(buffer)
-                limitless_status = {"last_fetch_utc": _now_utc_str(), "rows_accepted": count, "rows_rejected": 0}
+                should_flush = bool(buffer)
+            if should_flush:
+                stats = recorder.append_limitless_with_stats(buffer)
+                limitless_status = {
+                    "last_fetch_utc": _now_utc_str(),
+                    "rows_accepted": stats["accepted"],
+                    "rows_rejected": stats["validation_rejected"],
+                    "rows_deduped": stats["dedup_rejected"],
+                }
                 _write_ingestion_status(status_path, limitless_status, crypto_status)
-                LOGGER.info('{"event":"queue_flush","rows_accepted":%d}', count)
+                LOGGER.info(
+                    '{"event":"queue_flush","rows_submitted":%d,"rows_accepted":%d,'
+                    '"rows_rejected":%d,"rows_deduped":%d}',
+                    len(buffer),
+                    stats["accepted"],
+                    stats["validation_rejected"],
+                    stats["dedup_rejected"],
+                )
                 buffer = []
 
     async def crypto_loop() -> None:
@@ -388,11 +471,21 @@ async def run_ingestion_loop(config: AppConfig) -> None:
         while True:
             try:
                 rows = crypto_client.fetch_quotes()
-                recorder.append_crypto(rows)
-                count = len(rows) if isinstance(rows, list) else len(rows) if hasattr(rows, "__len__") else 0
-                crypto_status = {"last_fetch_utc": _now_utc_str(), "rows_accepted": count, "rows_rejected": 0}
+                stats = recorder.append_crypto_with_stats(rows)
+                crypto_status = {
+                    "last_fetch_utc": _now_utc_str(),
+                    "rows_accepted": stats["accepted"],
+                    "rows_rejected": stats["validation_rejected"],
+                    "rows_deduped": stats["dedup_rejected"],
+                }
                 _write_ingestion_status(status_path, limitless_status, crypto_status)
-                LOGGER.info('{"event":"crypto_flush","rows_accepted":%d}', count)
+                LOGGER.info(
+                    '{"event":"crypto_flush","rows_accepted":%d,"rows_rejected":%d,'
+                    '"rows_deduped":%d}',
+                    stats["accepted"],
+                    stats["validation_rejected"],
+                    stats["dedup_rejected"],
+                )
             except Exception as exc:  # pragma: no cover - network path
                 LOGGER.exception("Crypto ingestion loop failed: %s", exc)
             await asyncio.sleep(config.ingestion.crypto_poll_interval_seconds)
